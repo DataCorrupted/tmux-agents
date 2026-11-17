@@ -1,0 +1,1666 @@
+#!/usr/bin/python3 -IS
+"""tls: tmux sessions plus the status of the Claude Code agents running in them.
+
+  tls                 print the list once, like ps
+  ttop                the same list live and interactive, like top (= tls top)
+  tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
+                      splits, `claude --resume` in each dead agent's pane
+  tls forget ID       drop a dead agent from the list
+  tls new-name        print a free adjective-noun session name (for `t` and n)
+  tls report id=ID [key=value ...]
+                      report an agent's state, from any agent; or one JSON object
+                      on stdin (the interface: docs/interface.md)
+  tls setup           wire up this machine (Claude hooks, tmux hooks, old alias); safe to rerun
+  tls hook [claude]   the Claude Code adapter: a hook event on stdin becomes a
+                      report (never prints)
+  tls seen PANE       tmux hook: you looked at PANE, so its green dot turns grey
+
+Columns: session, dot and status, agent name, age, summary. A session with one
+agent is one row. A session with no agent or several has a row of its own, and
+its agents get a row each under it, from the status column on. An agent's name
+is the one /rename gave it, else Claude's title for the conversation; the
+summary is what it last said or asked. Dead agents group by the session they
+ran in. Narrow windows shrink the names and the summary to fit.
+
+ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
+selected session or agent pane (switch inside tmux, attach outside; detaching
+comes back here), brings back a dead agent's session, or marks a green agent
+outside tmux (VS Code) seen · 1-9 open a session at its most urgent agent or
+bring back a dead one · n opens a new session (adjective-noun name, current
+directory: like `t`) · Del or Backspace deletes the selected session, agent or
+dead agent (Enter confirms) · R brings back all dead agents · d forgets a dead
+agent: the selected one, or press its key · q quit.
+
+Dots: red blocked · yellow waiting on you · green done, not looked at yet ·
+blue busy (hollow: turn over, background task still running) · grey idle ·
+? agent with no status yet · x dead (pane closed or machine rebooted).
+
+State: one JSON file per agent session in ~/.local/state/agent-tls/, mirrored
+into the tmux pane options @agent-state and @agent-session. Agents report how
+to resume them; TLS_CLAUDE sets the command for Claude (default: claude). How it works: comments at the top of
+this file.
+"""
+# How it works
+#
+# Any agent tells tls how it's doing with `tls report` (docs/interface.md):
+# a session id, a state (busy, waiting, blocked, done, idle, background), a
+# summary, a name, and how to resume it. tls finds the agent's process and tmux
+# pane from the reporter's environment. Each session's record holds its state,
+# cwd, process, boot ID and tmux pane.
+#
+# `tls hook` is the Claude Code adapter. Claude Code hooks in
+# ~/.claude/settings.json (added by `tls setup`) run it on SessionStart,
+# UserPromptSubmit, PreToolUse (AskUserQuestion, ExitPlanMode), PostToolUse,
+# PermissionRequest, Notification, Stop, StopFailure and SessionEnd; it turns
+# each event into a report and reads the session's name and title from its
+# transcript. Headless `claude -p` and SDK runs are ignored.
+#
+# A report with state "finished" hands over the turn's last message, which
+# tells blocked, waiting and done apart: a security key or login request means
+# blocked, a closing question that isn't just an offer of more work means
+# waiting. A tmux-agent-classify file next to this one, if present, decides
+# instead. Claude's running background_tasks mean the hollow blue dot.
+#
+# Green turns grey when you look. When an agent first reports from a tmux pane,
+# tls adds five hooks at index [42] to that tmux server (client-attached,
+# client-session-changed, session-window-changed, after-select-pane,
+# pane-focus-in); they run `tls seen` only if the pane's agent is green. Opening
+# a session from ttop, Enter on an agent outside tmux, or typing a prompt also
+# clears green. Switching VS Code tabs doesn't count: tmux reports every
+# attached client as focused.
+#
+# An agent is dead when its process is gone (PID plus start time) or the boot ID
+# changed. A deliberate quit (/exit, /clear, logout) deletes the record; a kill
+# (tmux gone, reboot, closed terminal) keeps it, and resume recreates the tmux
+# session in the old cwd and types `claude --resume <id>`. Dead records go after
+# 14 days, or once Claude's transcript is gone.
+#
+# Hooks and ttop also save the structure of each tmux session an agent runs or
+# ran in (windows, layout strings, each pane's directory and agent) to
+# layouts.json, keyed by tmux server, so a reboot can't overwrite it. While a
+# dead agent has lost its pane, its session keeps the structure from before.
+# Bringing an agent back: if its pane sits at a shell prompt, resume types
+# there. Else its session is rebuilt if it's gone (every window and pane; other
+# panes come back as shells in their old directories), or its pane is split
+# back into its window, and the saved layout puts the splits back. With nothing
+# saved, it gets a new window.
+#
+# Del kills a session or an agent's pane once you confirm. The agents' records
+# are marked deleted first, so the dying Claude's last hooks can't list them as
+# dead; a later `claude --resume` of one clears the mark.
+#
+# Files: tls, ttop (runs `tls top`) and tls-test (self-test on throwaway tmux
+# servers) in one directory, plus tmux-agent-classify if you have one. Install
+# them as regular files, not symlinks (install.sh does): dotfile syncers often
+# skip symlinks. Hook errors go to errors.log in the state directory; hooks
+# never print.
+#
+# Uninstall: delete the `tls hook` entries from ~/.claude/settings.json and the
+# files, and restore the alias from its comment in ~/.bashrc if setup left one.
+# tmux drops the [42] hooks when its server restarts.
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+
+sys.dont_write_bytecode = True  # loading the classifier must not leave __pycache__ in ~/bin
+
+HOME = os.path.expanduser("~")
+STATE_DIR = os.environ.get("TLS_STATE_DIR") or os.path.join(HOME, ".local", "state", "agent-tls")
+TMUX_ARGS = os.environ.get("TLS_TMUX", "").split()  # e.g. "-L test", for tests
+CLAUDE = os.environ.get("TLS_CLAUDE") or "claude"  # command typed to resume an agent
+SELF = os.path.realpath(__file__)
+CLASSIFIER = os.path.join(os.path.dirname(SELF), "tmux-agent-classify")
+HOST = socket.gethostname()
+SID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}")  # a session id; also a file name
+DELIBERATE_END = {"prompt_input_exit", "clear", "logout"}  # SessionEnd reasons: user quit on purpose
+GONE_MAX_AGE = 14 * 86400
+RESUME_GRACE = 120
+DELETED_TTL = 60  # a record deleted in ttop stays this long, to swallow its dying agent's hooks
+SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh"}  # a pane at a prompt: safe to type into
+SERVER_ID = "#{pid}:#{start_time}"  # one tmux server's life: pane and window ids restart with it
+# Panes running one of these count as agents even before they report.
+AGENT_COMMANDS = set((os.environ.get("TLS_AGENT_COMMANDS") or "claude codex gemini").split())
+
+COLOR = {"blocked": 196, "waiting": 226, "done": 82, "working": 75, "bg": 75,
+         "idle": 243, "?": 243, "gone": 244}
+GLYPH = {"blocked": "●", "waiting": "●", "done": "●", "working": "◐", "bg": "◌",
+         "idle": "○", "?": "?", "gone": "✕"}
+URGENCY = {"blocked": 0, "waiting": 1, "done": 2, "working": 3, "bg": 4, "idle": 5, "?": 6}
+KEYS = "123456789abcefghijklmopstuvwxyz"  # d, n, q and r are commands
+
+# Claude Code events tls listens to, in the order `tls setup` adds them.
+HOOK_EVENTS = ("PermissionRequest", "SessionStart", "UserPromptSubmit", "PostToolUse",
+               "Notification", "Stop", "StopFailure", "SessionEnd", "PreToolUse")
+HOOK_MATCHER = {"PreToolUse": "AskUserQuestion|ExitPlanMode"}
+SEEN_HOOKS = ("client-attached", "client-session-changed", "session-window-changed",
+              "after-select-pane", "pane-focus-in")
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def now():
+    return int(time.time())
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def boot_id():
+    return read("/proc/sys/kernel/random/boot_id").strip()
+
+
+def proc_start(pid):
+    """Start time of PID in clock ticks since boot (field 22 of /proc/PID/stat)."""
+    try:
+        return int(read("/proc/%d/stat" % pid).rsplit(")", 1)[1].split()[19])
+    except (IndexError, ValueError, TypeError):
+        return None
+
+
+def first_line(text, limit):
+    for line in str(text or "").splitlines():
+        line = " ".join(line.split()).strip(" *#>-")
+        if line:
+            return line if len(line) <= limit else line[:limit - 1] + "…"
+    return ""
+
+
+def one_line(text, limit):
+    """text on one line and at most limit characters, as it is otherwise."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def tmux(*args, server=None):
+    """Run tmux and return its stdout, or None on failure. server=None uses
+    TLS_TMUX (tests) or the usual server; pass a list to pick one explicitly."""
+    cmd = ["tmux"] + (TMUX_ARGS if server is None else server) + list(args)
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           stdin=subprocess.DEVNULL, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+# ── state store ──────────────────────────────────────────────────────────────
+
+class Lock:
+    def __enter__(self):
+        import fcntl
+        os.makedirs(STATE_DIR, exist_ok=True)
+        self.f = open(os.path.join(STATE_DIR, ".lock"), "a")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+
+def path_of(sid):
+    return os.path.join(STATE_DIR, sid + ".json")
+
+
+def load(sid):
+    try:
+        with open(path_of(sid)) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def save(rec):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = "%s.%d.tmp" % (path_of(rec["session_id"]), os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(rec, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, path_of(rec["session_id"]))
+
+
+def remove(sid):
+    try:
+        os.remove(path_of(sid))
+    except OSError:
+        pass
+
+
+def records():
+    try:
+        names = os.listdir(STATE_DIR)
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        if name.endswith(".json"):
+            rec = load(name[:-5])
+            if rec and rec.get("session_id") == name[:-5]:
+                out.append(rec)
+    return out
+
+
+def set_state(rec, state, reason, event):
+    if rec.get("state") != state or "since" not in rec:
+        rec["since"] = now()
+    rec["state"] = state
+    if reason is not None:
+        rec["reason"] = reason
+    rec["event"] = event
+    rec["event_at"] = now()
+
+
+def pane_server(rec):
+    t = rec.get("tmux") or {}
+    return ["-S", t["socket"]] if t.get("socket") else None
+
+
+def sync_tmux(rec):
+    """Mirror the state into the agent's pane options and refresh its session
+    name and tmux server, in one tmux call against the server the agent runs in."""
+    t, server = rec.get("tmux") or {}, pane_server(rec)
+    if not t.get("pane") or not server:
+        return
+    pane = t["pane"]
+    out = tmux("display", "-p", "-t", pane, "#{session_name}\t#{window_index}\t#{window_name}\t" + SERVER_ID,
+               ";", "set", "-p", "-t", pane, "@agent-state", rec.get("state") or "",
+               ";", "set", "-p", "-t", pane, "@agent-session", rec["session_id"], server=server)
+    if out:
+        f = (out.splitlines()[0].split("\t") + ["", "", "", ""])[:4]
+        t.update(session=f[0], window=f[1], window_name=f[2], server=f[3])
+
+
+def clear_tmux(rec):
+    t, server = rec.get("tmux") or {}, pane_server(rec)
+    if t.get("pane") and server:
+        tmux("set", "-pu", "-t", t["pane"], "@agent-state", ";",
+             "set", "-pu", "-t", t["pane"], "@agent-session", server=server)
+
+
+def register_tmux_hooks(server=None):
+    """Have the tmux server run `tls seen` when you look at a green agent's
+    pane. Idempotent; index [42] keeps these apart from your own hooks."""
+    run = 'if -F "#{==:#{@agent-state},done}" { run-shell -b "%s seen #{pane_id}" }' % shlex.quote(SELF)
+    args = []
+    for name in SEEN_HOOKS:
+        args += [";", "set-hook", "-g", name + "[42]", run]
+    return tmux(*args[1:], server=server) is not None
+
+
+def mark_seen(rec):
+    """Green (done) -> grey (idle): you looked at it."""
+    with Lock():
+        cur = load(rec["session_id"])
+        if cur and cur.get("state") == "done":
+            set_state(cur, "idle", None, "seen")
+            sync_tmux(cur)
+            save(cur)
+
+
+# ── agent state ──────────────────────────────────────────────────────────────
+
+OFFER = re.compile(r"(want me to|would you like me to|should i also|shall i also|do you want me to also"
+                   r"|if you'?d? like|happy to|let me know)\b", re.I)
+BLOCKER = re.compile(r"\b(yubikey|security key|touch (your|the) key|2fa|two-factor|mfa|re-?authenticate"
+                     r"|(log|sign) ?in again|expired (token|credentials|certificate))\b", re.I)
+
+
+def builtin_classify(text):
+    """(verdict, sentence) for a turn's last message: blocked if one of its last
+    sentences wants a security key or a login, waiting if it ends on a question
+    that isn't just an offer of more work, else done."""
+    prose = re.sub(r"```.*?```", " ", text or "", flags=re.S)
+    said = [s.strip(" *_>-") for s in re.split(r"(?<=[.!?])\s+|\n+", prose)]
+    said = [s for s in said if s][-3:]
+    for s in said:
+        if BLOCKER.search(s):
+            return "blocked", s
+    if said and said[-1].endswith("?") and not OFFER.match(said[-1]):
+        return "waiting", said[-1]
+    return "done", ""
+
+
+def classify(text):
+    """blocked / waiting / done for a turn's last message, and the sentence
+    behind it. A tmux-agent-classify file next to this one decides if there is
+    one (its classify(text) returns verdict, rule, sentence); else
+    builtin_classify does."""
+    if os.path.exists(CLASSIFIER):
+        try:
+            import importlib.machinery
+            import importlib.util
+            loader = importlib.machinery.SourceFileLoader("agent_classify", CLASSIFIER)
+            mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("agent_classify", loader))
+            loader.exec_module(mod)
+            verdict, _rule, sentence = mod.classify(text)
+            return verdict, sentence or ""
+        except Exception:
+            pass
+    return builtin_classify(text)
+
+
+def agent_pid(name):
+    """The nearest ancestor process that is the agent called name: its command,
+    or the program in its first two arguments, has that name. None if none."""
+    p = os.getppid()
+    for _ in range(8):
+        if not name or p <= 1:
+            break
+        argv = read("/proc/%d/cmdline" % p).split("\0")[:2]
+        if read("/proc/%d/comm" % p).strip() == name or any(
+                os.path.basename(a) == name or "/" + name in a for a in argv):
+            return p
+        try:
+            p = int(read("/proc/%d/stat" % p).rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            break
+    return None
+
+
+def identify(rec, f, pid):
+    """Who and where the agent is: process (for liveness), cwd, transcript, and
+    tmux pane, from report f and the reporter's environment."""
+    rec.update(host=HOST, boot_id=boot_id(), pid=pid, pid_start=proc_start(pid),
+               cwd=f.get("cwd") or rec.get("cwd") or os.getcwd(),
+               transcript=f.get("transcript") or rec.get("transcript") or "")
+    pane, sock = os.environ.get("TMUX_PANE"), os.environ.get("TMUX", "").split(",")[0]
+    if pane and sock:
+        old = rec.get("tmux") or {}
+        rec["tmux"] = {"socket": sock, "pane": pane}
+        if old.get("pane") == pane and old.get("socket") == sock:
+            rec["tmux"].update({k: old[k] for k in ("session", "window", "window_name", "server") if k in old})
+        rec["where"] = "tmux"
+    else:
+        rec["tmux"] = None
+        # VS Code's agent panel can run an agent in a hidden tmux of its own,
+        # without TMUX and with TERM_PROGRAM=tmux; its VSCODE_* variables give it away.
+        vscode = os.environ.get("TERM_PROGRAM") == "vscode" or any(k.startswith("VSCODE_") for k in os.environ)
+        rec["where"] = "vscode" if vscode else "terminal"
+    rec.pop("ended", None)
+    rec.pop("resuming_at", None)
+
+
+# ── reports: the agent-neutral interface (docs/interface.md) ─────────────────
+
+REPORT_FIELDS = ("id", "agent", "state", "summary", "message", "prompt", "name", "title", "pid",
+                 "cwd", "resume", "transcript", "start", "end", "event")
+REPORT_STATES = {"busy": "working", "working": "working", "waiting": "waiting", "blocked": "blocked",
+                 "done": "done", "idle": "idle", "background": "bg", "bg": "bg"}  # -> record state
+
+
+def report_pid(f, rec):
+    """The agent's process: the report's pid, else an ancestor named like the
+    agent, else the session's process so far, else the reporter's parent."""
+    pid = str(f.get("pid") or "")
+    if pid.isdigit():
+        return int(pid)
+    rec = rec or {}
+    return agent_pid(f.get("agent") or rec.get("agent")) or rec.get("pid") or os.getppid()
+
+
+def apply(rec, f):
+    """Apply report f to rec, the record of its session (None: a new session),
+    and save it. Caller holds Lock. Returns (record, fresh), fresh when the
+    agent's process is new to tls; (None, False) when the report changed
+    nothing, ended the session, or came from an agent deleted in ttop."""
+    sid = f["id"]
+    if rec and rec.get("deleted"):
+        if not f.get("start"):
+            return None, False  # the dying agent's last reports
+        del rec["deleted"]  # it started again after all
+    if f.get("end"):
+        if rec:
+            clear_tmux(rec)
+            if f["end"] == "deliberate":
+                remove(sid)
+            else:  # killed (tmux gone, reboot, closed terminal): keep it resumable
+                rec["ended"] = {"reason": str(f["end"]), "at": now()}
+                rec["event"], rec["event_at"] = "end", now()
+                save(rec)
+        return None, False
+    pid = report_pid(f, rec)
+    fresh = rec is None or bool(f.get("start")) or rec.get("pid") != pid
+    if rec is None:
+        rec = {"session_id": sid, "created": now()}
+    if fresh:
+        identify(rec, f, pid)
+    before, changed = rec.get("state"), fresh
+    texts = {"agent": one_line(f.get("agent"), 40), "name": one_line(f.get("name"), 80),
+             "title": one_line(f.get("title"), 120), "prompt": first_line(f.get("prompt"), 160),
+             "resume": " ".join(str(f.get("resume") or "").split())}
+    for key, value in texts.items():
+        if f.get(key) is not None and rec.get(key) != value:
+            rec[key], changed = value, True
+    if f.get("message") is not None:
+        rec["last_message"], changed = first_line(f["message"], 200), True
+    state, summary = f.get("state"), f.get("summary")
+    if state == "finished":  # the turn is over: its last message tells done, waiting, blocked apart
+        state, sentence = classify(f.get("message") or "")
+        summary = rec.get("last_message", "") if state == "done" else sentence
+    if state in REPORT_STATES:
+        state = REPORT_STATES[state]
+        if summary is None and state != before:
+            summary = ""  # a new state doesn't keep the summary of the old one
+        set_state(rec, state, None if summary is None else first_line(summary, 160),
+                  f.get("event") or "report")
+        changed = True
+    elif summary is not None:
+        rec["reason"], changed = first_line(summary, 160), True
+    if not changed:
+        return None, False
+    if fresh or rec.get("state") != before:
+        sync_tmux(rec)
+    save(rec)
+    if pane_server(rec):
+        save_layout(list_panes(pane_server(rec)), records(), boot_id())
+    return rec, fresh
+
+
+# ── the Claude Code adapter ──────────────────────────────────────────────────
+
+def ask_reason(p):
+    if p.get("tool_name") == "ExitPlanMode":
+        return "plan ready for approval"
+    ti = p.get("tool_input") if isinstance(p.get("tool_input"), dict) else {}
+    qs = ti.get("questions")
+    if isinstance(qs, list) and qs and isinstance(qs[0], dict):
+        return first_line(qs[0].get("question"), 160) or "question"
+    return "question"
+
+
+def tool_summary(p):
+    ti = p.get("tool_input") if isinstance(p.get("tool_input"), dict) else {}
+    arg = ti.get("command") or ti.get("file_path") or ti.get("url") or ti.get("pattern") or ""
+    return first_line("%s %s" % (p.get("tool_name") or "tool", arg), 150)
+
+
+def claude_fields(ev, p, state):
+    """The report a Claude Code hook event makes, given the session's state so
+    far: {} when it changes nothing."""
+    if ev == "SessionStart":  # compact: the same session goes on as it was
+        return {"start": True} if p.get("source") == "compact" else {"start": True, "state": "idle", "event": "start"}
+    if ev == "UserPromptSubmit":
+        prompt = p.get("prompt") or ""
+        f = {"state": "busy", "event": "prompt"}
+        if not prompt.lstrip().startswith("<task-notification"):  # a background task finished
+            f["prompt"] = prompt
+        return f
+    if ev == "PreToolUse":  # matcher: AskUserQuestion|ExitPlanMode
+        return {"state": "waiting", "summary": ask_reason(p), "event": "ask"}
+    if ev == "PermissionRequest":
+        if p.get("tool_name") in ("AskUserQuestion", "ExitPlanMode"):
+            return {} if state == "waiting" else {"state": "waiting", "summary": ask_reason(p), "event": "ask"}
+        return {"state": "waiting", "summary": "permission: " + tool_summary(p), "event": "permission"}
+    if ev == "Notification":
+        kind = p.get("notification_type") or ""
+        if kind in ("permission_prompt", "elicitation_dialog") and state != "waiting":
+            return {"state": "waiting", "summary": p.get("message") or "", "event": "notify"}
+        if kind == "idle_prompt" and state == "working":  # turn ended without Stop (Esc)
+            return {"state": "idle", "event": "idle"}
+        return {}
+    if ev == "PostToolUse":  # fires on every tool call: only a change counts
+        return {} if state == "working" else {"state": "busy", "event": "tool"}
+    if ev == "Stop":
+        msg = p.get("last_assistant_message") or ""
+        running = [t for t in (p.get("background_tasks") or [])
+                   if isinstance(t, dict) and t.get("status") == "running"]
+        if running:  # Claude goes on by itself when these finish
+            what = running[0].get("description") or running[0].get("command") or "task"
+            more = " (+%d more)" % (len(running) - 1) if len(running) > 1 else ""
+            return {"state": "background", "summary": first_line("background: " + what, 150) + more,
+                    "message": msg, "event": "stop"}
+        return {"state": "finished", "message": msg, "event": "stop"}
+    if ev == "StopFailure":
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "failures.log"), "a") as log:
+            log.write("%s %s\n" % (time.strftime("%F %T"), json.dumps(p)[:800]))
+        if state != "working":
+            return {}  # a background request failed after the turn: not your problem
+        err = p.get("error") or p.get("message") or p.get("reason") or "API error"
+        return {"state": "blocked", "summary": "turn failed: " + first_line(err, 140), "event": "fail"}
+    if ev == "SessionEnd":
+        reason = p.get("reason") or ""
+        return {"end": "deliberate" if reason in DELIBERATE_END else reason or "killed"}
+    return {}
+
+
+def transcript_titles(path):
+    """(name, title) from the end of a Claude transcript: the name /rename
+    gave the session, and Claude's own title for the conversation. Claude
+    repeats both every few lines, so the last MB is enough."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - (1 << 20)))
+            tail = f.read().decode(errors="ignore")
+    except (OSError, TypeError):
+        return "", ""
+    found = {}
+    for key in ("customTitle", "agentName", "aiTitle"):
+        at = tail.rfind('"%s":"' % key)  # inside a JSON string it would read \"key\"
+        m = re.compile(r'"%s":"((?:[^"\\]|\\.)*)"' % key).match(tail, at) if at >= 0 else None
+        if m:
+            try:
+                found[key] = json.loads('"%s"' % m.group(1)).strip()
+            except ValueError:
+                pass
+    return found.get("customTitle") or found.get("agentName") or "", found.get("aiTitle") or ""
+
+
+def hook():
+    """The Claude Code adapter: a Claude hook event (JSON on stdin) becomes a
+    report about its session."""
+    raw = sys.stdin.read()
+    if os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk"):
+        return  # headless `claude -p` and SDK runs aren't agents you attend to
+    p = json.loads(raw)
+    sid, ev = p.get("session_id") or "", p.get("hook_event_name") or ""
+    if not SID_RE.fullmatch(sid):
+        return
+    pid = os.environ.get("CLAUDE_PID", "")  # set by some Claude Code launchers
+    with Lock():
+        rec = load(sid)
+        f = claude_fields(ev, p, (rec or {}).get("state"))
+        if f and not f.get("end"):
+            f["name"], f["title"] = transcript_titles(p.get("transcript_path") or (rec or {}).get("transcript"))
+        f.update(id=sid, agent="claude", cwd=p.get("cwd"), transcript=p.get("transcript_path"))
+        if pid.isdigit():
+            f["pid"] = pid
+        rec, fresh = apply(rec, f)
+    if rec and fresh and pane_server(rec):
+        register_tmux_hooks(pane_server(rec))
+
+
+def report_cmd(argv):
+    """tls report: one report from any agent, as key=value arguments and/or one
+    JSON object on stdin, read when there are no arguments or one is "-"."""
+    f = {}
+    if not argv or "-" in argv:
+        raw = sys.stdin.read().strip()
+        obj = json.loads(raw) if raw else {}
+        if not isinstance(obj, dict):
+            raise ValueError("stdin must hold one JSON object")
+        f.update(obj)
+    for arg in argv:
+        if arg != "-":
+            key, sep, value = arg.partition("=")
+            if not sep:
+                raise ValueError("expected key=value, not %r" % arg)
+            f[key] = value
+    bad = sorted(set(f) - set(REPORT_FIELDS))
+    if bad:
+        raise ValueError("unknown field %s; the fields are %s" % (", ".join(bad), ", ".join(REPORT_FIELDS)))
+    for key in ("start", "end"):  # flags: "", 0, false and no leave them unset
+        if str(f.get(key, "")).lower() in ("", "0", "false", "no"):
+            f.pop(key, None)
+    f["id"] = str(f.get("id") or "")
+    if not SID_RE.fullmatch(f["id"]):
+        raise ValueError("id is required: up to 120 letters, digits and _.:-, starting with a letter or digit")
+    if f.get("state") is not None and f["state"] not in REPORT_STATES and f["state"] != "finished":
+        raise ValueError("state must be busy, waiting, blocked, done, idle, background or finished")
+    with Lock():
+        rec, fresh = apply(load(f["id"]), f)
+    if rec and fresh and pane_server(rec):
+        register_tmux_hooks(pane_server(rec))
+    return 0
+
+
+def seen(pane):
+    sid = (tmux("show", "-pqv", "-t", pane, "@agent-session", server=[]) or "").strip()
+    rec = load(sid) if SID_RE.fullmatch(sid) else None
+    if rec:
+        mark_seen(rec)
+
+
+def guarded(fn, *args):
+    """Hooks must never print or fail: log errors instead."""
+    try:
+        fn(*args)
+    except Exception:
+        import traceback
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(os.path.join(STATE_DIR, "errors.log"), "a") as f:
+                f.write("%s %s\n%s\n" % (time.strftime("%F %T"), sys.argv[1:], traceback.format_exc()))
+        except Exception:
+            pass
+
+
+# ── session structure ────────────────────────────────────────────────────────
+
+PANE_FIELDS = ("socket", "server", "session", "attached", "window_id", "window", "window_name",
+               "auto_name", "window_active", "width", "height", "layout", "pane", "index",
+               "active", "cwd", "cmd", "title")
+PANE_FORMAT = "\t".join(("#{socket_path}", SERVER_ID, "#{session_name}", "#{session_attached}",
+                         "#{window_id}", "#{window_index}", "#{window_name}", "#{automatic-rename}",
+                         "#{window_active}", "#{window_width}", "#{window_height}", "#{window_layout}",
+                         "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_path}",
+                         "#{pane_current_command}", "#{pane_title}"))
+
+
+def list_panes(server=None):
+    """Every pane of the tmux server as a dict of PANE_FIELDS, in session,
+    window and pane order; None if there's no server."""
+    out = tmux("list-panes", "-a", "-F", PANE_FORMAT, server=server)
+    if out is None:
+        return None
+    n, panes = len(PANE_FIELDS), []
+    for line in out.splitlines():
+        f = line.split("\t")
+        if len(f) >= n:  # the pane title comes last and may hold tabs
+            panes.append(dict(zip(PANE_FIELDS, f[:n - 1] + ["\t".join(f[n - 1:])])))
+    return panes
+
+
+def structure(panes, agents):
+    """{session: {"windows": [...]}} for list_panes() output. A window keeps
+    its id, index, name, size and layout string; a pane its id, directory and
+    the agent in it (agents maps a pane id to a Claude session id)."""
+    out = {}
+    for p in panes:
+        ws = out.setdefault(p["session"], {"windows": []})["windows"]
+        if not ws or ws[-1]["id"] != p["window_id"]:
+            ws.append({"id": p["window_id"], "index": p["window"], "name": p["window_name"],
+                       "auto": p["auto_name"] == "1", "active": p["window_active"] == "1",
+                       "size": [p["width"], p["height"]], "layout": p["layout"], "panes": []})
+        ws[-1]["panes"].append({"id": p["pane"], "cwd": p["cwd"], "active": p["active"] == "1",
+                                "agent": agents.get(p["pane"])})
+    return out
+
+
+def layouts_path():
+    return os.path.join(STATE_DIR, "layouts.json")
+
+
+def load_layouts():
+    """{tmux server: {session: structure}}, as save_layout keeps it."""
+    try:
+        d = json.loads(read(layouts_path()) or "{}")
+    except ValueError:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def save_layout(panes, recs, boot):
+    """Save the structure of the sessions agents run or ran in, so that a dead
+    agent can come back where it was. While an agent that died has lost its
+    pane, its session keeps the structure from before. An entry goes once no
+    agent record points at its session. Caller holds Lock."""
+    if not panes:
+        return
+    server = panes[0]["server"]
+    kept = [r for r in recs if not r.get("deleted")]
+    here = [r for r in kept if (r.get("tmux") or {}).get("server") == server]
+    agents = {r["tmux"].get("pane"): r["session_id"]  # one alive in a pane wins over one that died there
+              for r in sorted(here, key=lambda r: alive(r, boot))}
+    dead = {r["session_id"] for r in here if not alive(r, boot)}
+    refs = {((r.get("tmux") or {}).get("server"), (r.get("tmux") or {}).get("session")) for r in kept}
+    d = load_layouts()
+    mine, changed = dict(d.get(server) or {}), False
+    for name, st in structure(panes, agents).items():
+        old = mine.get(name)
+        if (server, name) not in refs or old == st:
+            continue
+        have = {p["id"] for w in st["windows"] for p in w["panes"]}
+        if old and any(p.get("agent") in dead and p["id"] not in have
+                       for w in old["windows"] for p in w["panes"]):
+            continue
+        mine[name], changed = st, True
+    if changed:
+        d[server] = mine
+    for key in list(d):
+        for name in list(d[key]):
+            if (key, name) not in refs:
+                del d[key][name]
+                changed = True
+        if not d[key]:
+            del d[key]
+            changed = True
+    if changed:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = "%s.%d.tmp" % (layouts_path(), os.getpid())
+        with open(tmp, "w") as f:
+            json.dump(d, f, indent=1, ensure_ascii=False)
+        os.replace(tmp, layouts_path())
+
+
+# ── setup ────────────────────────────────────────────────────────────────────
+
+def tilde(path):
+    return "~" + path[len(HOME):] if path.startswith(HOME + os.sep) else path
+
+
+def rewrite(path, text, stamp):
+    """Replace path's contents (through symlinks, keeping its mode), first
+    copying it to <path>.bak-tls-<stamp>. Returns the backup path or ''."""
+    real, backup = os.path.realpath(path), ""
+    if os.path.exists(real):
+        backup = path + ".bak-tls-" + stamp
+        shutil.copy2(real, backup)
+    os.makedirs(os.path.dirname(real), exist_ok=True)
+    tmp = "%s.tls-%d.tmp" % (real, os.getpid())
+    with open(tmp, "w") as f:
+        f.write(text)
+    if backup:
+        shutil.copymode(real, tmp)
+    os.replace(tmp, real)
+    return backup
+
+
+def setup_claude_hooks(stamp):
+    path = os.path.join(HOME, ".claude", "settings.json")
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    except OSError as e:
+        return "left alone: can't read %s (%s)" % (tilde(path), e.strerror)
+    try:
+        cfg = json.loads(text) if text.strip() else {}
+    except ValueError:
+        return "left alone: %s isn't valid JSON" % tilde(path)
+    hooks = cfg.setdefault("hooks", {}) if isinstance(cfg, dict) else None
+    if not isinstance(hooks, dict) or not all(isinstance(hooks.get(ev, []), list) for ev in HOOK_EVENTS):
+        return "left alone: unexpected layout in %s" % tilde(path)
+    cmd, added = SELF + " hook", []
+    for ev in HOOK_EVENTS:
+        groups = hooks.setdefault(ev, [])
+        if any(isinstance(h, dict) and re.search(r"(^|/)tls hook$", str(h.get("command", "")).strip())
+               for g in groups if isinstance(g, dict) for h in g.get("hooks") or []):
+            continue
+        group = {"matcher": HOOK_MATCHER[ev]} if ev in HOOK_MATCHER else {}
+        group["hooks"] = [{"type": "command", "command": cmd, "timeout": 10}]
+        groups.append(group)
+        added.append(ev)
+    if not added:
+        return "already in %s" % tilde(path)
+    backup = rewrite(path, json.dumps(cfg, indent=2, ensure_ascii=False) + ("\n" if text.endswith("\n") else ""), stamp)
+    return "added for %d events in %s%s" % (len(added), tilde(path), " (backup %s)" % tilde(backup) if backup else "")
+
+
+def setup_alias(stamp):
+    done = []
+    for name in (".bashrc", ".bash_aliases", ".zshrc"):
+        path = os.path.join(HOME, name)
+        text, n = re.subn(r"(?m)^([ \t]*)(alias[ \t]+tls=.*)$",
+                          lambda m: "%s# tls is %s: tmux session list with agent status, printed once (ttop: live). Was: %s"
+                          % (m.group(1), tilde(SELF), m.group(2)), read(path))
+        if n:
+            done.append("%s (backup %s)" % (tilde(path), tilde(rewrite(path, text, stamp))))
+    if not done:
+        return "no tls alias to replace"
+    return "commented out alias tls= in %s; open a new shell or run: unalias tls" % ", ".join(done)
+
+
+def setup():
+    """Per-machine wiring. Where a dotfile syncer brings settings.json and
+    .bashrc along already, only the tmux step does anything."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    print("tls setup on %s (%s)" % (HOST.split(".")[0], tilde(SELF)))
+    print("  Claude hooks  " + setup_claude_hooks(stamp))
+    print("  shell alias   " + setup_alias(stamp))
+    print("  tmux hooks    " + ("registered on the running tmux server" if register_tmux_hooks()
+                                else "no tmux server running; added when an agent starts in one"))
+    found = shutil.which("tls")
+    if not found or os.path.realpath(found) != SELF:
+        print("  note          `tls` on your PATH is %s, not this file" % (found or "missing"))
+    print()
+    return one_shot()
+
+
+# ── view ─────────────────────────────────────────────────────────────────────
+
+def alive(rec, boot):
+    pid = rec.get("pid")
+    return (rec.get("boot_id") == boot and not rec.get("ended") and isinstance(pid, int)
+            and proc_start(pid) == rec.get("pid_start"))
+
+
+SAVED = {}  # the structure this process saved last: ttop saves only changes
+
+
+def snapshot():
+    boot, t = boot_id(), now()
+    panes = list_panes()
+    sock, server = (panes[0]["socket"], panes[0]["server"]) if panes else ("", "")
+    sessions, by_name = [], {}
+    for p in panes or []:
+        if p["session"] not in by_name:
+            by_name[p["session"]] = {"name": p["session"], "attached": p["attached"] not in ("", "0"),
+                                     "agents": []}
+            sessions.append(by_name[p["session"]])
+    ids = {p["pane"] for p in panes or []}
+    live, outside, gone = {}, [], []
+    for rec in records():
+        if rec.get("host") != HOST:
+            continue
+        if rec.get("deleted"):  # listed nowhere until its agent is surely gone
+            if not alive(rec, boot) and t - int(rec["deleted"]) > DELETED_TTL:
+                remove(rec["session_id"])
+            continue
+        tm = rec.get("tmux") or {}
+        if alive(rec, boot):
+            if sock and tm.get("socket") == sock and tm.get("pane") in ids:
+                live[tm["pane"]] = rec
+                if not tm.get("server"):  # recorded before tls kept track of tmux servers
+                    with Lock():
+                        cur = load(rec["session_id"])
+                        if cur and cur.get("tmux"):
+                            cur["tmux"]["server"] = tm["server"] = server
+                            save(cur)
+            else:
+                outside.append(rec)
+        elif ((rec.get("transcript") and not os.path.exists(rec["transcript"]))
+              or t - int(rec.get("event_at") or 0) > GONE_MAX_AGE):
+            remove(rec["session_id"])  # can't be resumed any more
+        else:
+            gone.append(rec)
+    for p in panes or []:
+        rec = live.get(p["pane"])
+        if rec or p["cmd"] in AGENT_COMMANDS:
+            by_name[p["session"]]["agents"].append({"pane": p["pane"], "window": p["window"],
+                                                    "index": p["index"], "rec": rec})
+    if panes:
+        cur = (structure(panes, {}), sorted((pane, r["session_id"]) for pane, r in live.items()))
+        if SAVED.get("cur") != cur or t - SAVED.get("at", 0) >= 30:
+            with Lock():
+                save_layout(panes, records(), boot)
+            SAVED.update(cur=cur, at=t)
+    outside.sort(key=lambda r: -int(r.get("event_at") or 0))
+    gone.sort(key=lambda r: -int(r.get("event_at") or 0))
+    return {"server": panes is not None, "sessions": sessions, "outside": outside, "gone": gone,
+            "panes": panes or []}
+
+
+def detail(rec):
+    if not rec:
+        return "no status yet (starts at its next prompt)"
+    st = rec.get("state")
+    if st in ("blocked", "waiting", "bg", "done"):
+        return rec.get("reason") or rec.get("last_message") or ""
+    return "> " + rec["prompt"] if rec.get("prompt") else ""
+
+
+def label(rec, skip=""):
+    """What to call an agent: the name it was given, else the title of its
+    conversation, else its kind (claude, codex, ...). skip is a name not worth
+    repeating: its session's."""
+    rec = rec or {}
+    for name in (rec.get("name"), rec.get("title"), rec.get("agent")):
+        if name and name != skip:
+            return name
+    return ""
+
+
+def ready(recs):
+    """The dead agents of recs that aren't on their way back already."""
+    t = now()
+    return [r for r in recs if t - int(r.get("resuming_at") or 0) >= RESUME_GRACE]
+
+
+def dead_groups(snap):
+    """Dead agents grouped by the tmux session they ran in (one that wasn't in
+    tmux is a group of its own), most recent first: [(name, records)]."""
+    groups = {}
+    for rec in snap["gone"]:
+        t = rec.get("tmux") or {}
+        key = (t.get("server"), t["session"]) if t.get("session") else rec["session_id"]
+        groups.setdefault(key, (t.get("session") or rec.get("where") or "?", []))[1].append(rec)
+    return list(groups.values())
+
+
+BLANK = {"key": "", "name": "", "attached": False, "state": "", "age": None, "label": "",
+         "detail": "", "where": "", "action": None}
+DEAD = ("dead", "deadsession")
+
+
+def build_rows(snap, live=False):
+    """Rows to draw, and the hotkeys as {key: row index}. A session with one
+    agent is one row; a session with none or several has a row of its own and
+    a row per agent under it. Dead agents group the same way, by the session
+    they ran in. Each row has an id (to find it again after a refresh) and a
+    kind: session, agent, outside, dead or deadsession. A row with an action
+    is selectable in ttop: ("open", session, pane, record) shows the session
+    (at that pane), ("seen", record) marks an agent outside tmux seen, and
+    ("restore", records) brings dead agents back. A session's key picks its
+    most urgent agent."""
+    rows, hotkeys, keys = [], {}, iter(KEYS)
+    for s in snap["sessions"]:
+        agents, key, head = s["agents"], next(keys, ""), len(rows)
+        if len(agents) != 1:
+            rows.append(dict(BLANK, id=("session", s["name"]), kind="session", key=key, name=s["name"],
+                             attached=s["attached"], action=("open", s["name"], None, None)))
+        for a in agents:
+            rec = a["rec"]
+            row = dict(BLANK, id=("pane", a["pane"]), kind="agent", state=(rec or {}).get("state") or "?",
+                       age=(rec or {}).get("since"), label=label(rec), detail=detail(rec),
+                       where="%s %s.%s" % (s["name"], a["window"], a["index"]),
+                       action=("open", s["name"], a["pane"], rec))
+            if len(agents) == 1:  # the session's own row
+                row.update(kind="session", key=key, name=s["name"], attached=s["attached"],
+                           label=label(rec, s["name"]))
+            rows.append(row)
+        if key:
+            urgency = [URGENCY.get((a["rec"] or {}).get("state") or "?", 9) for a in agents]
+            hotkeys[key] = head + (1 + urgency.index(min(urgency)) if len(agents) > 1 else 0)
+    if snap["outside"]:
+        rows.append({"section": "outside tmux" + (" · enter marks a green one seen" if live else "")})
+        for rec in snap["outside"]:
+            rows.append(dict(BLANK, id=("outside", rec["session_id"]), kind="outside",
+                             name="%s %s" % (rec.get("where") or "?", os.path.basename(rec.get("cwd") or "") or "/"),
+                             state=rec.get("state") or "?", age=rec.get("since"), label=label(rec),
+                             detail=detail(rec), action=("seen", rec)))
+    if snap["gone"]:
+        rows.append({"section": "dead (pane closed or machine rebooted) · " +
+                     ("enter or its key brings its session back as it was" if live
+                      else "bring them back in ttop, or: tls resume all")})
+        for name, recs in dead_groups(snap):
+            todo = [r for r in ready(recs) if resume_cmd(r)]
+            key = next(keys, "") if todo else ""
+            act = ("restore", todo) if todo else None if any(map(resume_cmd, recs)) else ("noresume",)
+            if key:
+                hotkeys[key] = len(rows)
+            if len(recs) > 1:
+                rows.append(dict(BLANK, id=("deadsession", name), kind="deadsession", key=key, name=name,
+                                 action=act, recs=recs))
+            for rec in recs:
+                resuming = resume_cmd(rec) and rec not in todo
+                row = dict(BLANK, id=("dead", rec["session_id"]), kind="dead", state="gone",
+                           state_text="resuming…" if resuming else "was " + (rec.get("state") or "?"),
+                           age=rec.get("event_at"), label=label(rec),
+                           detail="> " + rec["prompt"] if rec.get("prompt") else rec.get("reason") or "",
+                           where=(rec.get("tmux") or {}).get("session") or "", recs=[rec],
+                           action=None if resuming else act if rec in todo else ("noresume",))
+                if len(recs) == 1:
+                    row.update(key=key, name=name, label=label(rec, skip=name))
+                rows.append(row)
+    return rows, hotkeys
+
+
+def char_width(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+
+def fit(s, w):
+    if w <= 0:
+        return ""
+    if sum(map(char_width, s)) <= w:
+        return s
+    out, n = [], 0
+    for ch in s:
+        if n + char_width(ch) > w - 1:
+            break
+        out.append(ch)
+        n += char_width(ch)
+    return "".join(out) + "…"
+
+
+def pad(s, w):
+    s = fit(s, w)
+    return s + " " * (w - sum(map(char_width, s)))
+
+
+def ago(ts):
+    if not ts:
+        return ""
+    d = max(0, now() - int(ts))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if d >= size:
+            return "%d%s" % (d // size, unit)
+    return "%ds" % d
+
+
+BAR = "\033[48;5;237m"  # background of the row selected in ttop
+
+
+def dim(s, color):
+    return "\033[2m%s\033[0m" % s if color else s
+
+
+def paint(segs, width, color):
+    """(text, 256-color or None) segments as one line at most width columns
+    wide, cut with an ellipsis. Returns the line and the columns left over.
+    Colors end with 39m (foreground only) so a selection bar survives them."""
+    out, room = [], width
+    for text, hue in segs:
+        text = fit(text, room)
+        room -= sum(map(char_width, text))
+        out.append("\033[38;5;%dm%s\033[39m" % (hue, text) if color and hue is not None and text else text)
+    return "".join(out), room
+
+
+STATE_TEXT = {"working": "busy"}  # the status column's word where it isn't the state's name
+
+
+def width_of(s):
+    return sum(map(char_width, s))
+
+
+def fit_middle(s, w):
+    """s cut to w columns in the middle, so names that share a start, and the
+    attached mark at the end, stay readable."""
+    if width_of(s) <= w or w < 3:
+        return fit(s, w)
+
+    def take(chars, room):
+        out = []
+        for ch in chars:
+            room -= char_width(ch)
+            if room < 0:
+                break
+            out.append(ch)
+        return out
+    return "".join(take(s, w // 2)) + "…" + "".join(reversed(take(reversed(s), (w - 1) // 2)))
+
+
+def state_word(r):
+    return r.get("state_text") or STATE_TEXT.get(r["state"], r["state"])
+
+
+def columns(rows, width, live):
+    """(session name, status, agent name) column widths for rows; the summary
+    gets the rest of width. The names get up to 12 columns each, the summary
+    then up to 24, then the names grow to their longest (at most 24 and 28),
+    and when the summaries are short the names may have their room too. A
+    column no row uses takes no room."""
+    cells = [r for r in rows if "section" not in r]
+    want = {"name": max([4] + [width_of(r["name"]) + r["attached"] for r in cells]),
+            "agent": max([0] + [width_of(r["label"]) for r in cells]),
+            "summary": max([0] + [width_of(r["detail"]) for r in cells])}
+    status = max([0] + [width_of(state_word(r)) for r in cells if r["state"]])
+    fixed = (3 if live else 0) + 1 + (status + 3 if status else 0) + (1 if want["agent"] else 0) + 6
+    room = max(0, width - fixed)
+    w = {"name": min(want["name"], 12), "agent": min(want["agent"], 12)}
+    if w["name"] + w["agent"] > room:  # narrower than that: share what there is
+        w["name"] = room * w["name"] // (w["name"] + w["agent"])
+        w["agent"] = room - w["name"]
+    spare = room - w["name"] - w["agent"]
+    spare -= min(spare, 24)  # the summary's share
+    for key, cap in (("name", 24), ("agent", 28)):
+        grow = min(spare, max(0, min(want[key], cap) - w[key]))
+        w[key] += grow
+        spare -= grow
+    extra = max(0, room - w["name"] - w["agent"] - want["summary"])
+    for key in ("name", "agent"):
+        grow = min(extra, want[key] - w[key])
+        w[key] += grow
+        extra -= grow
+    return w["name"], status, w["agent"]
+
+
+def row_line(r, cols, width, color, live=False, selected=False):
+    """[ttop: selection mark, key] session name, then for an agent its dot and
+    status, name, age and summary. A selected row comes back with the bar
+    still on, for the caller's \\033[K to extend."""
+    name_w, status_w, agent_w = cols
+    st = r["state"]
+    segs = [("%s%s " % ("▌" if selected else " ", r["key"] or " "), None)] if live else []
+    segs.append((pad(fit_middle(r["name"] + ("*" if r["attached"] else ""), name_w), name_w) + " ", None))
+    if st:
+        segs.append(("%s %s " % (GLYPH.get(st, " "), pad(state_word(r), status_w)), COLOR.get(st)))
+        if agent_w:
+            segs.append((pad(r["label"], agent_w) + " ", None))
+        segs += [("%4s  " % ago(r["age"]), None), (r["detail"], None)]
+    text, room = paint(segs, width, color)
+    return BAR + text + " " * room if selected and color else text.rstrip()
+
+
+def body_lines(rows, width, color, live=False, sel=None):
+    """The lines for rows, and {row index: line index} for scrolling."""
+    cols = columns(rows, width, live)
+    lines, at = [], {}
+    for i, r in enumerate(rows):
+        if "section" in r:
+            lines += ["", dim(fit("── %s ──" % r["section"], width), color)]
+        else:
+            at[i] = len(lines)
+            lines.append(row_line(r, cols, width, color, live, i == sel))
+    return lines or ["  (no tmux sessions)"], at
+
+
+def title(snap, name, color):
+    head = "%s · %s · %s" % (name, HOST.split(".")[0], time.strftime("%H:%M:%S"))
+    return dim(head if snap["server"] else head + " · no tmux server", color)
+
+
+# ── actions ──────────────────────────────────────────────────────────────────
+
+def inside_tmux():
+    return bool(os.environ.get("TMUX")) and not TMUX_ARGS
+
+
+def open_session(name, pane, rec, leave=None, enter=None):
+    """Show session name, at pane if given. Returns an error message or None."""
+    if rec:
+        mark_seen(rec)
+    if pane:
+        tmux("select-window", "-t", pane, ";", "select-pane", "-t", pane)
+    if inside_tmux():
+        return None if tmux("switch-client", "-t", "=" + name) is not None else "couldn't switch to " + name
+    if leave:
+        leave()
+    try:
+        rc = subprocess.call(["tmux"] + TMUX_ARGS + ["attach-session", "-t", "=" + name])
+    finally:
+        if enter:
+            enter()
+    return "couldn't attach to " + name if rc else None
+
+
+def safe_name(s):
+    return re.sub(r"[^A-Za-z0-9_-]", "-", s).strip("-") or "agent"
+
+
+def resume_cmd(rec):
+    """The command that resumes rec's agent: the one its reports gave, else,
+    for Claude, `claude --resume ID` (TLS_CLAUDE picks the command); "" if none."""
+    if rec.get("resume"):
+        return rec["resume"]
+    if rec.get("agent", "claude") == "claude":
+        return "%s --resume %s" % (CLAUDE, rec["session_id"])
+    return ""
+
+
+def type_resume(pane, rec):
+    """Type the agent's resume command into pane, and note that it's on its way."""
+    tmux("send-keys", "-t", pane, "-l", resume_cmd(rec), ";", "send-keys", "-t", pane, "Enter")
+    with Lock():
+        cur = load(rec["session_id"]) or rec
+        cur["resuming_at"] = now()
+        save(cur)
+
+
+def resume(rec):
+    """Resume the agent in a new window of its tmux session, or a new session.
+    Returns (session, pane) or (None, error)."""
+    name = (rec.get("tmux") or {}).get("session") or safe_name(os.path.basename(rec.get("cwd") or ""))
+    cwd = rec.get("cwd") if os.path.isdir(rec.get("cwd") or "") else HOME
+    if tmux("has-session", "-t", "=" + name) is not None:
+        out = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "=" + name + ":", "-c", cwd)
+    else:
+        out = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", cwd)
+    pane = (out or "").strip()
+    if not pane:
+        return None, "couldn't create tmux session %s" % name
+    type_resume(pane, rec)
+    return name, pane
+
+
+def start_dir(p):
+    return p.get("cwd") if os.path.isdir(p.get("cwd") or "") else HOME
+
+
+def ordered_panes(w):
+    """Saved window w's panes in the order its layout string lists them,
+    which is the order tmux fills the layout's cells in."""
+    leaves = ["%" + n for n in re.findall(r"\d+x\d+,\d+,\d+,(\d+)", w["layout"].split(",", 1)[-1])]
+    by_id = {p["id"]: p for p in w["panes"]}
+    return [by_id[i] for i in leaves] if sorted(leaves) == sorted(by_id) else w["panes"]
+
+
+def build_window(w, session, first=False):
+    """Create saved window w in session, or as the first window of a new
+    session of that name: its panes, in their directories, then its layout.
+    Returns (window id, {saved pane id: pane id})."""
+    panes = ordered_panes(w)
+    args = ["-P", "-F", "#{window_id}\t#{window_index}\t#{pane_id}", "-c", start_dir(panes[0])]
+    if first:
+        out = tmux("new-session", "-d", "-s", session, "-x", w["size"][0], "-y", w["size"][1], *args)
+    else:
+        out = (tmux("new-window", "-d", "-t", "=%s:%s" % (session, w["index"]), *args)
+               or tmux("new-window", "-d", "-t", "=%s:" % session, *args))
+    f = (out or "").strip().split("\t")
+    if len(f) != 3:
+        return None, {}
+    win, index, last = f
+    if first and index != w["index"]:
+        tmux("move-window", "-s", win, "-t", "=%s:%s" % (session, w["index"]))
+    made = {panes[0]["id"]: last}
+    for p in panes[1:]:
+        last = (tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", last, "-c", start_dir(p)) or "").strip()
+        if not last:
+            break
+        made[p["id"]] = last
+        tmux("select-layout", "-t", win, "tiled")  # room for the next split
+    if len(made) == len(panes):
+        tmux("select-layout", "-t", win, w["layout"])
+    if not w["auto"]:
+        tmux("rename-window", "-t", win, w["name"])
+    for p in panes:
+        if p["active"] and p["id"] in made:
+            tmux("select-pane", "-t", made[p["id"]])
+    return win, made
+
+
+def repair_window(w, todo):
+    """Split the lost panes of the agents in todo back into window w, which
+    still exists, each next to a saved neighbour; then w's layout, once all
+    its panes are back. Returns {saved pane id: pane id}."""
+    panes = ordered_panes(w)
+    live = (tmux("list-panes", "-t", w["id"], "-F", "#{pane_id}") or "").split()
+    made = {p["id"]: p["id"] for p in panes if p["id"] in live}
+    for i, p in enumerate(panes):
+        if p["id"] in made or p.get("agent") not in todo:
+            continue
+        before = [made[q["id"]] for q in panes[:i] if q["id"] in made]
+        after = [made[q["id"]] for q in panes[i + 1:] if q["id"] in made]
+        if before or after:
+            where = ["-t", before[-1]] if before else ["-b", "-t", after[0]]
+            new = (tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-c", start_dir(p), *where) or "").strip()
+            if new:
+                made[p["id"]] = new
+    if (tmux("list-panes", "-t", w["id"], "-F", "#{pane_id}") or "").split() == [made.get(p["id"]) for p in panes]:
+        tmux("select-layout", "-t", w["id"], w["layout"])
+    return made
+
+
+def rebuild(name, st, todo, same_server):
+    """Recreate what's gone of session name from its saved structure st, for
+    the dead agents in todo (session ids): the whole session if it's gone
+    (other panes come back as shells), else their windows, split back into if
+    still there. Returns {session id: pane id} for the agents with a pane."""
+    made = {}
+    if tmux("has-session", "-t", "=" + name) is None:
+        first, active = True, None
+        for w in st["windows"]:
+            win, m = build_window(w, name, first)
+            if win:
+                first = False
+                made.update(m)
+                active = win if w["active"] else active
+        if active:
+            tmux("select-window", "-t", active)
+    else:
+        live = set((tmux("list-windows", "-t", "=" + name, "-F", "#{window_id}") or "").split()
+                   if same_server else [])
+        for w in st["windows"]:
+            if any(p.get("agent") in todo for p in w["panes"]):
+                made.update(repair_window(w, todo) if w["id"] in live else build_window(w, name)[1])
+    return {p["agent"]: made[p["id"]] for w in st["windows"] for p in w["panes"]
+            if p.get("agent") in todo and p["id"] in made}
+
+
+def restore(recs):
+    """Bring dead agents back where they were. One whose pane still sits at a
+    shell prompt resumes right there; one whose pane is gone gets it back from
+    the saved structure (rebuild); any other gets a new window, as before.
+    Returns (session, pane) to show, or (None, error)."""
+    panes = list_panes() or []
+    by_id = {p["pane"]: p for p in panes}
+    server = panes[0]["server"] if panes else ""
+    layouts, plans, left, shown, err = load_layouts(), {}, [], [], "nothing to bring back"
+    for r in recs:
+        if not resume_cmd(r):
+            continue
+        t = r.get("tmux") or {}
+        p = by_id.get(t.get("pane")) if t.get("server") == server else None
+        st = layouts.get(t.get("server") or "", {}).get(t.get("session") or "")
+        if p and p["cmd"] in SHELLS and p["session"] == t.get("session"):
+            type_resume(p["pane"], r)  # Claude exited to its shell
+            shown.append((p["session"], p["pane"]))
+        elif not p and st and any(q.get("agent") == r["session_id"] for w in st["windows"] for q in w["panes"]):
+            plans.setdefault((t["server"], t["session"]), []).append(r)
+        else:
+            left.append(r)
+    for (srv, name), group in plans.items():
+        made = rebuild(name, layouts[srv][name], {r["session_id"] for r in group}, srv == server)
+        for r in group:
+            if r["session_id"] in made:
+                type_resume(made[r["session_id"]], r)
+                shown.append((name, made[r["session_id"]]))
+            else:
+                left.append(r)
+    for r in left:
+        name, pane = resume(r)
+        if name:
+            shown.append((name, pane))
+        else:
+            err = pane
+    return shown[0] if shown else (None, err)
+
+
+def restore_all(snap):
+    """Bring back every dead agent. Returns the sessions brought back."""
+    done = []
+    for name, recs in dead_groups(snap):
+        todo = [r for r in ready(recs) if resume_cmd(r)]
+        if todo and restore(todo)[0]:
+            done.append(name)
+    return done
+
+
+def plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def mark_deleted(recs, deleted=True):
+    """Hide records while their agents' panes die: hook() drops their last
+    events and snapshot() lists them nowhere."""
+    with Lock():
+        for rec in recs:
+            cur = load(rec["session_id"])
+            if cur:
+                if deleted:
+                    cur["deleted"] = now()
+                else:
+                    cur.pop("deleted", None)
+                save(cur)
+
+
+def delete(what, args, recs):
+    """Run tmux kill-* args, with the records of the agents it kills hidden
+    first. Returns a message."""
+    mark_deleted(recs)
+    if tmux(*args) is None:
+        mark_deleted(recs, False)
+        return "couldn't delete " + what
+    return "deleted " + what
+
+
+def forget(recs, what):
+    for rec in recs:
+        remove(rec["session_id"])
+    return "forgot " + what
+
+
+def delete_ask(r, snap):
+    """Del on row r: (question, action) for Enter to confirm, or (message,
+    None) when there's nothing to delete. An action returns a message."""
+    kind, name = r.get("kind"), r.get("name")
+    if kind == "session":
+        panes = [p["pane"] for p in snap["panes"] if p["session"] == name]
+        agents = [a for s in snap["sessions"] if s["name"] == name for a in s["agents"]]
+        here = " · this ttop runs there too" if inside_tmux() and os.environ.get("TMUX_PANE") in panes else ""
+        return ("delete session %s: %s, %s%s? enter: yes · esc: no"
+                % (name, plural(len(panes), "pane"), plural(len(agents), "agent"), here),
+                lambda: delete("session " + name, ["kill-session", "-t", "=" + name],
+                               [a["rec"] for a in agents if a["rec"]]))
+    if kind == "agent":  # named by its name or title, else by where it is
+        pane, rec = r["action"][2], r["action"][3]
+        who = r["label"] if r["label"] and r["label"] != (rec or {}).get("agent") else r["where"]
+        return ("delete agent %s (kills its pane)? enter: yes · esc: no" % who,
+                lambda: delete(who, ["kill-pane", "-t", pane], [rec] if rec else []))
+    if kind in DEAD:
+        recs = r["recs"]
+        named = r["label"] if r["label"] != recs[0].get("agent") else ""
+        who = ("dead agent " + (name or named or "in " + (r["where"] or "?")) if len(recs) == 1
+               else "%d dead agents of %s" % (len(recs), name))
+        return "forget %s? enter: yes · esc: no" % who, lambda: forget(recs, who)
+    if kind == "outside":
+        return "%s isn't in tmux: close it where it runs" % name, None
+    return "nothing to delete", None
+
+
+# Words for new session names (n in ttop, and `t` through `tls new-name`): one per letter.
+ADJECTIVES = ("ancient blue calm dark easy fast good happy icy joyful kind lazy mad neat old "
+              "pink quick red slow tiny ugly vast warm xtra young zen").split()
+NOUNS = ("ant bear cat dog elk finch goat hawk ivy jay kiwi lily mouse newt owl pig quail root "
+         "snake tiger urchin viper wolf xray yacht zebra").split()
+
+
+def session_name(taken):
+    """A free name, picked the way `t` picks one: a random adjective that the
+    fewest sessions start with, then a random noun that makes a free pair."""
+    import random
+    taken = set(taken)
+    uses = {a: sum(s.startswith(a + "-") for s in taken) for a in ADJECTIVES}
+    fewest = min(uses.values())
+    adj = random.choice([a for a in ADJECTIVES if uses[a] == fewest])
+    free = [n for n in NOUNS if "%s-%s" % (adj, n) not in taken]
+    if free:
+        return "%s-%s" % (adj, random.choice(free))
+    i = 0  # all pairs taken: a number, as `t` does
+    while str(i) in taken:
+        i += 1
+    return str(i)
+
+
+def new_session():
+    """Create a detached session with a free name. Like `t`, it starts in the
+    current directory. Returns (name, None) or (None, error)."""
+    taken = (tmux("list-sessions", "-F", "#{session_name}") or "").splitlines()
+    name = session_name(taken)
+    if tmux("new-session", "-d", "-s", name) is None:
+        return None, "couldn't create tmux session " + name
+    return name, None
+
+
+def find(prefix):
+    hits = [r for r in records() if r["session_id"].startswith(prefix)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def one_shot():
+    snap = snapshot()
+    rows, _ = build_rows(snap)
+    color = sys.stdout.isatty()
+    lines, _ = body_lines(rows, shutil.get_terminal_size((160, 24)).columns, color)
+    print("\n".join([title(snap, "tls", color), ""] + lines))
+    return 0
+
+
+HINT = "↑↓ select · enter or 1-9 open/resume · n new session · del delete · R resume all dead · q quit · * attached"
+DEL = ("\x7f", "\x08", "\033[3~")  # Backspace (the Mac delete key), ^H, forward Delete
+NAV = {"\033[A": "up", "\033OA": "up", "\033[B": "down", "\033OB": "down",
+       "\033[5~": "pgup", "\033[6~": "pgdn",
+       "\033[H": "home", "\033OH": "home", "\033[1~": "home", "\033[7~": "home",
+       "\033[F": "end", "\033OF": "end", "\033[4~": "end", "\033[8~": "end"}
+ENTER = ("\r", "\n")
+
+
+def read_keys(fd):
+    """The keys waiting on fd, escape sequences (arrows, Home, ...) whole even
+    when split across reads; a lone ESC is the Esc key. None: input is gone."""
+    import select
+    try:
+        buf = os.read(fd, 1024)
+        while re.search(rb"\033(\[[0-9;]*|O)?$", buf) and select.select([fd], [], [], 0.05)[0]:
+            more = os.read(fd, 1024)
+            if not more:
+                break
+            buf += more
+    except OSError:
+        return None
+    if not buf:
+        return None
+    return re.findall(r"\033\[[0-9;?]*[ -/]*[@-~]|\033O.|\033.?|.", buf.decode(errors="ignore"), re.S)
+
+
+def ttop():
+    import select
+    import termios
+    import tty
+    fd, out = sys.stdin.fileno(), sys.stdout
+    saved = termios.tcgetattr(fd)
+
+    def enter():
+        tty.setcbreak(fd)
+        out.write("\033[?1049h\033[?25l")
+        out.flush()
+
+    def leave():
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        out.write("\033[?25h\033[?1049l")
+        out.flush()
+
+    enter()
+    sel = sel_id = None  # selected row, and its id to find it again after a refresh
+    top = refresh_at = msg_until = 0
+    msg, ask = "", None  # ask: (until, on Enter, on a dead agent's key) while a question is up
+    try:
+        while True:
+            if time.time() >= refresh_at:
+                snap = snapshot()
+                rows, hotkeys = build_rows(snap, live=True)
+                picks = [i for i, r in enumerate(rows) if r.get("action")]
+                refresh_at = time.time() + 1
+                if picks:  # the same agent if it's still listed, else the nearest row
+                    near = sel or 0
+                    sel = next((i for i in picks if rows[i]["id"] == sel_id),
+                               min(picks, key=lambda i: (abs(i - near), i)))
+                    sel_id = rows[sel]["id"]
+                else:
+                    sel = None
+            size = shutil.get_terminal_size((100, 30))
+            width = size.columns - 1  # stay off the last column: no autowrap
+            body, at = body_lines(rows, width, True, live=True, sel=sel)
+            foot = ["", dim(fit(msg if time.time() < msg_until else HINT, width), True)]
+            room = max(1, size.lines - 2 - len(foot))
+            if sel is not None:  # scroll the selection into view
+                y, starts = at[sel], set(at.values())
+                if y < top:
+                    top = y
+                    while top > 0 and top - 1 not in starts and y - top + 1 < room:
+                        top -= 1  # bring its section heading along
+                top = max(top, y - room + 1)
+            top = max(0, min(top, len(body) - room))
+            lines = ([title(snap, "ttop", True), ""] + body[top:top + room] + foot)[:size.lines]
+            out.write("\033[H" + "\n".join(l + "\033[K\033[0m" for l in lines) + "\033[J")
+            out.flush()
+            if not select.select([fd], [], [], max(0, refresh_at - time.time()))[0]:
+                continue
+            keys = read_keys(fd)
+            if keys is None:
+                return 0
+            for k in keys:
+                pending, ask = (ask if ask and time.time() < ask[0] else None), None
+                if pending:  # any key answers the question
+                    i = hotkeys.get(k)
+                    if k in ENTER and pending[1]:
+                        msg = pending[1]()
+                    elif pending[2] and i is not None and rows[i]["kind"] in DEAD:
+                        msg = pending[2](i)
+                    else:
+                        msg = "cancelled"
+                    msg_until, refresh_at = time.time() + 4, 0
+                    continue
+                if k == "q":
+                    return 0
+                if k in NAV:
+                    if picks:
+                        page = max(1, room - 1)
+                        step = {"up": -1, "down": 1, "pgup": -page, "pgdn": page,
+                                "home": -len(picks), "end": len(picks)}[NAV[k]]
+                        j = picks.index(sel) + step if sel in picks else 0
+                        sel = picks[max(0, min(len(picks) - 1, j))]
+                        sel_id = rows[sel]["id"]
+                    continue
+                if k in DEL or k == "d" and sel is not None and rows[sel]["kind"] in DEAD:
+                    if sel is not None:
+                        msg, action = delete_ask(rows[sel], snap)
+                        msg_until = time.time() + 10
+                        ask = (msg_until, action, None) if action else None
+                    continue
+                if k == "d":
+                    msg, msg_until = "forget which dead agent? press its key · esc: cancel", time.time() + 10
+                    ask = (msg_until, None, lambda i: forget(rows[i]["recs"], rows[i]["name"]))
+                    continue
+                if k == "R":
+                    names = restore_all(snap)
+                    msg = "resumed " + ", ".join(names) if names else "nothing to resume"
+                    msg_until, refresh_at = time.time() + 5, 0
+                    continue
+                if k == "n":
+                    name, err = new_session()
+                    if name:
+                        sel_id = ("session", name)  # the refresh selects its row
+                        err = open_session(name, None, None, leave, enter)
+                    if err:
+                        msg, msg_until = err, time.time() + 5
+                    refresh_at = 0
+                    break  # the list changed under any keys typed after this one
+                i = sel if k in ENTER else hotkeys.get(k)
+                if i is None or not rows[i].get("action"):
+                    continue
+                sel, sel_id, act = i, rows[i]["id"], rows[i]["action"]
+                if act[0] == "seen":  # outside tmux: nothing to switch to
+                    if act[1].get("state") == "done":
+                        mark_seen(act[1])
+                        refresh_at = 0
+                    else:
+                        msg, msg_until = rows[i]["name"] + " isn't in tmux: nothing to switch to", time.time() + 4
+                    continue
+                if act[0] == "noresume":  # its agent never said how to resume it
+                    msg = "%s left no resume command: del forgets it" % (rows[i]["name"] or rows[i]["label"])
+                    msg_until = time.time() + 5
+                    continue
+                if act[0] == "open":
+                    err = open_session(*act[1:], leave=leave, enter=enter)
+                else:  # restore
+                    name, pane = restore(act[1])
+                    err = open_session(name, pane, None, leave, enter) if name else pane
+                if err:
+                    msg, msg_until = err, time.time() + 5
+                refresh_at = 0
+                break  # the list changed under any keys typed after this one
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        leave()
+
+
+def main(argv):
+    cmd = argv[0] if argv else ""
+    if cmd == "hook" and argv[1:] in ([], ["claude"]):  # the Claude Code adapter
+        guarded(hook)
+        return 0
+    if cmd == "report":
+        try:
+            return report_cmd(argv[1:])
+        except (ValueError, OSError) as e:
+            print("tls report: %s" % e, file=sys.stderr)
+            return 2
+    if cmd == "seen" and len(argv) == 2:
+        guarded(seen, argv[1])
+        return 0
+    if cmd == "setup":
+        return setup()
+    if cmd == "resume" and len(argv) == 2:
+        snap = snapshot()
+        if argv[1] == "all":
+            names = restore_all(snap)
+            print("resumed: %s" % (", ".join(names) or "nothing"))
+            return 0
+        rec = find(argv[1])
+        group = [recs for _, recs in dead_groups(snap)
+                 if rec and rec["session_id"] in {r["session_id"] for r in recs}]
+        if not group:
+            print("no dead agent matches %s" % argv[1], file=sys.stderr)
+            return 1
+        name, pane = restore(ready(group[0]))
+        print("resumed in %s (%s)" % (name, pane) if name else pane)
+        return 0 if name else 1
+    if cmd == "forget" and len(argv) == 2:
+        rec = find(argv[1])
+        if not rec:
+            print("no agent matches %s" % argv[1], file=sys.stderr)
+            return 1
+        remove(rec["session_id"])
+        return 0
+    if cmd == "new-name":
+        print(session_name((tmux("list-sessions", "-F", "#{session_name}") or "").splitlines()))
+        return 0
+    if cmd == "top":  # ttop
+        return ttop() if sys.stdin.isatty() and sys.stdout.isatty() else one_shot()
+    if cmd not in ("", "-1"):  # -1: what plain tls did before ttop existed
+        print(__doc__.strip())
+        return 0 if cmd in ("-h", "--help") else 2
+    return one_shot()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

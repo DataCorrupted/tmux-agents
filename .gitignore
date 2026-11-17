@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# A private classifier dropped next to tls stays out of the repo.
+bin/tmux-agent-classify

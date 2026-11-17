@@ -1,0 +1,437 @@
+#!/bin/bash
+# Self-test for tls and tmux-agents.bash: fake Claude hook payloads and agent
+# reports against throwaway tmux servers (every tmux command names its socket),
+# a temp state dir and a fake $HOME. Never touches your tmux server, your
+# settings or ~/.local/state/agent-tls.
+#   tls-test
+set -u
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+TLS="$HERE/tls"
+D=$(mktemp -d /tmp/tls-test.XXXXXX)
+SRV="tls_test_$$"
+T="tmux -L $SRV"
+TT="tmux -L ${SRV}_term"   # stands in for your terminal: its panes are real ttys
+fails=0
+check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fails=$((fails + 1)); fi; }
+retry() { for _ in $(seq 25); do "$@" && return 0; sleep 0.2; done; return 1; }
+field() { /usr/bin/python3 -IS -c "import json,sys; r=json.load(open(sys.argv[1])); print(r$1)" "$D/state/$SID.json" 2>/dev/null; }
+cleanup() {
+  $T kill-server 2>/dev/null; $TT kill-server 2>/dev/null
+  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE9:-} 2>/dev/null
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SRV}_term"
+  rm -rf "$D"
+}
+trap cleanup EXIT
+
+export TLS_STATE_DIR="$D/state"   # tls has to create it
+touch "$D/transcript.jsonl"
+SID=11111111-2222-3333-4444-555555555555
+
+# Throwaway server: session "alpha" whose pane stands in for an agent; new
+# windows run `cat` so resume's keystrokes land somewhere harmless.
+$T -f /dev/null new-session -d -s alpha -x 160 -y 40 "sleep 600"
+$T set -g default-command "cat"
+PANE=$($T display -p -t alpha '#{pane_id}')
+SOCK=$($T display -p '#{socket_path}')
+sleep 600 & FAKE=$!   # stands in for the claude process (liveness)
+
+hook() {  # hook EVENT [extra JSON fields]
+  printf '{"session_id":"%s","hook_event_name":"%s","cwd":"%s","transcript_path":"%s"%s}' \
+    "$SID" "$1" "$D" "$D/transcript.jsonl" "${2:+,$2}" |
+    TMUX="$SOCK,1,0" TMUX_PANE="$PANE" CLAUDE_PID="$FAKE" CLAUDE_CODE_ENTRYPOINT=cli "$TLS" hook
+}
+pane_opt() { $T show -pqv -t "$PANE" "$1"; }
+view() { TLS_TMUX="-L $SRV" "$TLS"; }
+
+out=$(hook SessionStart '"source":"startup"')
+check "hook prints nothing" '[ -z "$out" ]'
+check "start -> idle" '[ "$(field "[\"state\"]")" = idle ]'
+check "pane option mirrored" '[ "$(pane_opt @agent-state)" = idle ] && [ "$(pane_opt @agent-session)" = "$SID" ]'
+check "tmux session recorded" '[ "$(field "[\"tmux\"][\"session\"]")" = alpha ]'
+check "seen hooks registered on the agent's tmux server" \
+  '[ "$($T show-hooks -g | grep -cF "$TLS seen")" = 4 ] && $T show-hooks -gw | grep -F "pane-focus-in[42]" | grep -qF "$TLS seen"'
+
+hook UserPromptSubmit '"prompt":"rebase the stack\nsecond line"'
+check "prompt -> working" '[ "$(field "[\"state\"]")" = working ]'
+check "prompt first line kept" '[ "$(field "[\"prompt\"]")" = "rebase the stack" ]'
+hook UserPromptSubmit '"prompt":"<task-notification>\n<task-id>x</task-id>"'
+check "task notification doesn't replace prompt" '[ "$(field "[\"prompt\"]")" = "rebase the stack" ]'
+
+hook PreToolUse '"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Red or blue?"}]}'
+check "AskUserQuestion -> waiting + question" '[ "$(field "[\"state\"]")" = waiting ] && [ "$(field "[\"reason\"]")" = "Red or blue?" ]'
+hook PostToolUse '"tool_name":"AskUserQuestion"'
+check "answer -> working" '[ "$(field "[\"state\"]")" = working ]'
+
+hook PermissionRequest '"tool_name":"Bash","tool_input":{"command":"rm -rf build"}'
+check "permission -> waiting" '[ "$(field "[\"state\"]")" = waiting ] && [ "$(field "[\"reason\"]")" = "permission: Bash rm -rf build" ]'
+hook PostToolUse '"tool_name":"Bash"'
+
+hook Stop '"last_assistant_message":"Fixed it.\n\nShould I land it?","background_tasks":[]'
+check "question at end -> waiting" '[ "$(field "[\"state\"]")" = waiting ]'
+hook UserPromptSubmit '"prompt":"yes"'
+hook Stop '"last_assistant_message":"Please tap your YubiKey so I can continue.","background_tasks":[]'
+check "yubikey -> blocked" '[ "$(field "[\"state\"]")" = blocked ]'
+check "classifier leaves no __pycache__ next to tls" '[ ! -e "$HERE/__pycache__" ]'
+hook UserPromptSubmit '"prompt":"build it"'
+hook Stop '"last_assistant_message":"Build started.","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"make release build"}]'
+check "running background task -> bg" '[ "$(field "[\"state\"]")" = bg ] && [ "$(field "[\"reason\"]")" = "background: make release build" ]'
+hook UserPromptSubmit '"prompt":"<task-notification>done</task-notification>"'
+hook Stop '"last_assistant_message":"Build passed. Want me to also run the tests?","background_tasks":[]'
+check "optional offer -> done" '[ "$(field "[\"state\"]")" = done ]'
+
+hook StopFailure '"error":"rate_limit"'
+check "failure after the turn ignored" '[ "$(field "[\"state\"]")" = done ]'
+
+# Looking at a green agent turns it grey (the hooks registered above).
+$T split-window -d -t alpha "sleep 600"   # selecting the already-active pane fires no hook
+$T select-pane -t alpha:0.1 ; $T select-pane -t "$PANE"
+for _ in $(seq 20); do [ "$(field "[\"state\"]")" = idle ] && break; sleep 0.2; done
+check "after-select-pane marks done as seen" '[ "$(field "[\"state\"]")" = idle ] && [ "$(pane_opt @agent-state)" = idle ]'
+
+hook UserPromptSubmit '"prompt":"next"'
+hook Stop '"last_assistant_message":"All done.","background_tasks":[]'
+check "view shows the session and green state" 'view | grep -q "alpha .*done .*All done."'
+$T new-window -d -t alpha:
+$T select-window -t alpha:1 ; $T select-window -t alpha:0
+for _ in $(seq 20); do [ "$(field "[\"state\"]")" = idle ] && break; sleep 0.2; done
+check "session-window-changed marks done as seen" '[ "$(field "[\"state\"]")" = idle ]'
+
+out=$(printf '{"session_id":"99999999-0000-0000-0000-000000000000","hook_event_name":"SessionStart","source":"startup"}' |
+  TMUX="$SOCK,1,0" TMUX_PANE="$PANE" CLAUDE_PID="$FAKE" CLAUDE_CODE_ENTRYPOINT=sdk-cli "$TLS" hook)
+check "headless claude -p ignored" '[ ! -e "$D/state/99999999-0000-0000-0000-000000000000.json" ]'
+
+# Without CLAUDE_PID, the hook takes the nearest process above it named claude.
+SID8=88888888-0000-0000-0000-000000000000
+cat > "$D/as-claude" <<EOF
+printf '{"session_id":"$SID8","hook_event_name":"SessionStart","source":"startup","cwd":"$D","transcript_path":"$D/transcript.jsonl"}' |
+  env -u CLAUDE_PID -u TMUX -u TMUX_PANE CLAUDE_CODE_ENTRYPOINT=cli "$TLS" hook
+echo \$\$
+EOF
+CPID=$(bash -c "exec -a claude bash '$D/as-claude'")
+check "without CLAUDE_PID, the hook finds the claude process it runs under" '[ "$(SID=$SID8 field "[\"pid\"]")" = "$CPID" ]'
+"$TLS" forget $SID8
+
+# Agent dies without SessionEnd (crash / reboot): shown as dead, resumable.
+kill "$FAKE"; wait "$FAKE" 2>/dev/null
+check "dead agent listed" 'view | grep -q "dead" && view | grep -q "alpha .*was idle"'
+TLS_TMUX="-L $SRV" "$TLS" resume "${SID:0:8}" >/dev/null
+sleep 0.5
+check "resume types claude --resume in a new window" '$T capture-pane -p -t alpha:2 | grep -q "claude --resume $SID"'
+check "row shows resuming" 'view | grep -q "resuming"'
+
+# SessionEnd: killed keeps the record, deliberate exit removes it.
+sleep 600 & FAKE=$!
+hook SessionStart '"source":"resume"'
+check "resume makes it live again" 'view | grep -q "alpha .*idle" && ! view | grep -q dead'
+hook SessionEnd '"reason":"other"'
+check "killed (reason other) stays resumable" '[ "$(field "[\"ended\"][\"reason\"]")" = other ] && view | grep -q "was idle"'
+check "pane option cleared on end" '[ -z "$(pane_opt @agent-state)" ]'
+hook SessionStart '"source":"resume"'
+hook SessionEnd '"reason":"prompt_input_exit"'
+check "deliberate exit removes record" '[ ! -e "$D/state/$SID.json" ]'
+
+# tls and ttop on a real terminal. Sessions now: alpha (no agent) and beta,
+# whose agent has just finished (green).
+$TT -f /dev/null new-session -d -s term -x 160 -y 40 "sleep 600"
+$TT set -g remain-on-exit on
+$T new-session -d -s beta -x 160 -y 40 "sleep 600"
+SID2=22222222-3333-4444-5555-666666666666
+PANE2=$($T display -p -t beta '#{pane_id}')
+sleep 600 & FAKE2=$!
+beta() { SID=$SID2 PANE=$PANE2 FAKE=$FAKE2 hook "$@"; }
+beta SessionStart '"source":"startup"'
+beta UserPromptSubmit '"prompt":"bisect it"'
+beta Stop '"last_assistant_message":"All done.","background_tasks":[]'
+state_is() { [ "$(SID=$1 field "[\"state\"]")" = "$2" ]; }   # state_is SID STATE
+term() { $TT new-window -d -P -F '#{pane_id}' -t term: "env -u TMUX TLS_STATE_DIR='$D/state' TLS_TMUX='-L $SRV' $1"; }
+shows() { $TT capture-pane -p -t "$1" | grep -q "$2"; }      # shows PANE PATTERN, on the terminal
+shows_in() { $T capture-pane -p -t "$1" | grep -q "$2"; }    # same, inside the test server
+exited_ok() { [ "$($TT display -p -t "$1" '#{pane_dead}#{pane_dead_status}')" = 10 ]; }
+client_on() { $T list-clients -F '#{client_session}' | grep -qx "$1"; }
+
+P=$(term "'$TLS'")
+check "tls on a terminal prints once and exits" 'retry exited_ok "$P" && shows "$P" "beta .*done .*All done."'
+
+# Outside tmux: Enter attaches here, and detaching comes back to ttop.
+P=$(term "'$HERE/ttop'")
+check "ttop starts on the first session, highlighted" \
+  'retry shows "$P" "▌1 *alpha" && $TT capture-pane -ep -t "$P" | grep "alpha" | grep -q "48;5;237"'
+$TT send-keys -t "$P" Down
+check "down arrow moves the highlight" 'retry shows "$P" "▌2.*beta .*done" && ! shows "$P" "▌1"'
+$TT send-keys -t "$P" Up
+check "up arrow moves it back" 'retry shows "$P" "▌1 *alpha"'
+$TT send-keys -t "$P" Down Enter
+check "enter attaches to the selected session" 'retry client_on beta'
+check "opening a green agent marks it seen" 'retry state_is $SID2 idle'
+$T detach-client -s beta
+check "detaching comes back to ttop, same row selected" 'retry shows "$P" "▌2.*beta .*idle"'
+# n creates a session named like `t` names one, in ttop's directory, and opens it.
+new_client() { $T list-clients -F '#{client_session}' | grep -Ex '[a-z]+-[a-z]+' | head -1 | grep .; }
+$TT send-keys -t "$P" n
+check "n attaches to a new adjective-noun session" 'retry new_client >/dev/null'
+NEW=$(new_client)
+check "the new session starts in ttop's directory" '[ -n "$NEW" ] && [ "$($T display -p -t "=$NEW:" "#{pane_current_path}")" = "$(pwd -P)" ]'
+$T detach-client -s "$NEW"
+check "detaching comes back to ttop, new session selected" '[ -n "$NEW" ] && retry shows "$P" "▌.*$NEW"'
+$T kill-session -t "=$NEW"   # the checks below count on alpha and beta only
+$TT send-keys -t "$P" q
+check "q quits ttop" 'retry exited_ok "$P"'
+
+# Inside tmux: ttop runs in alpha while a client is attached to alpha; a key
+# or Enter has to switch that client.
+$TT new-window -d -t term: "env -u TMUX tmux -L $SRV attach -t alpha"
+retry client_on alpha
+TP=$($T new-window -P -F '#{pane_id}' -t alpha: "env TLS_STATE_DIR='$D/state' '$HERE/ttop'")
+retry shows_in "$TP" "▌1 *alpha"
+$T send-keys -t "$TP" 2
+check "a session's key switches the attached client" 'retry client_on beta'
+$T switch-client -c "$($T list-clients -F '#{client_name}')" -t alpha
+check "client back on alpha" 'client_on alpha'
+$T send-keys -t "$TP" Home Down Enter
+check "enter switches the attached client to the selected session" 'retry client_on beta'
+$T send-keys -t "$TP" n
+check "n switches the attached client to a new session" 'retry new_client >/dev/null'
+NEW=$(new_client)
+check "ttop selects the new session" '[ -n "$NEW" ] && retry shows_in "$TP" "▌.*$NEW"'
+$T switch-client -c "$($T list-clients -F '#{client_name}')" -t beta
+$T kill-session -t "=$NEW"
+
+# Agents outside tmux. VS Code's agent panel runs Claude with TERM_PROGRAM=tmux
+# but no TMUX; only its own variables say vscode. Enter marks a green one seen.
+SID3=33333333-4444-5555-6666-777777777777
+sleep 600 & FAKE3=$!
+outside() {  # outside SID EVENT [extra JSON] [VAR=value ...]
+  printf '{"session_id":"%s","hook_event_name":"%s","cwd":"%s","transcript_path":"%s"%s}' \
+    "$1" "$2" "$D" "$D/transcript.jsonl" "${3:+,$3}" |
+    env -u TMUX -u TMUX_PANE $(compgen -e | sed -n 's/^VSCODE_.*/-u &/p') \
+      TERM_PROGRAM=tmux CLAUDE_PID="$FAKE3" CLAUDE_CODE_ENTRYPOINT=cli "${@:4}" "$TLS" hook
+}
+SID4=44444444-5555-6666-7777-888888888888
+outside $SID4 SessionStart '"source":"startup"'
+check "an agent outside tmux is labelled terminal" '[ "$(SID=$SID4 field "[\"where\"]")" = terminal ]'
+outside $SID4 SessionEnd '"reason":"prompt_input_exit"'
+outside $SID3 SessionStart '"source":"startup"' VSCODE_IPC_HOOK_CLI=/tmp/x
+outside $SID3 Stop '"last_assistant_message":"All done.","background_tasks":[]'
+check "VS Code's agent panel is labelled vscode" '[ "$(SID=$SID3 field "[\"where\"]")" = vscode ] && state_is $SID3 done'
+check "ttop lists it under outside tmux" 'retry shows_in "$TP" "vscode tls-test.* ● done"'
+$T send-keys -t "$TP" End
+check "ttop can select an agent outside tmux" 'retry shows_in "$TP" "▌ .*vscode tls-test"'
+$T send-keys -t "$TP" Enter
+check "enter on it marks it seen" 'retry state_is $SID3 idle'
+
+# beta's agent dies: d then Enter forgets it once it's selected.
+kill "$FAKE2"; wait "$FAKE2" 2>/dev/null
+check "ttop lists the dead agent" 'retry shows_in "$TP" "3 beta .*✕ was idle"'
+$T send-keys -t "$TP" End
+check "End selects the last row" 'retry shows_in "$TP" "▌3 beta .*✕"'
+$T send-keys -t "$TP" d
+check "d asks about the selected dead agent" 'retry shows_in "$TP" "forget dead agent beta?"'
+$T send-keys -t "$TP" Enter
+check "enter confirms: record forgotten" 'retry test ! -e "$D/state/$SID2.json"'
+$T send-keys -t "$TP" q
+
+# A session with two agents: a row of its own and a row per agent under it, by
+# name (/rename), else by Claude's title. Del deletes an agent or a session. A
+# dead agent comes back where it was: its whole session rebuilt, its pane split
+# back into its window, or right in its pane when that sits at a shell prompt.
+SID5=55555555-6666-7777-8888-999999999999
+SID6=66666666-7777-8888-9999-aaaaaaaaaaaa
+SID7=77777777-8888-9999-aaaa-bbbbbbbbbbbb
+printf '{"type":"custom-title","customTitle":"fixer","sessionId":"%s"}\n' $SID5 > "$D/t5.jsonl"
+printf '{"type":"ai-title","aiTitle":"Rebase the stack","sessionId":"%s"}\n' $SID6 > "$D/t6.jsonl"
+: > "$D/t7.jsonl"
+agent_in() {  # agent_in SID PANE PID EVENT [extra JSON]; transcript: $D/t<SID's first digit>.jsonl
+  printf '{"session_id":"%s","hook_event_name":"%s","cwd":"%s","transcript_path":"%s"%s}' \
+    "$1" "$4" "$D" "$D/t${1:0:1}.jsonl" "${5:+,$5}" |
+    TMUX="$SOCK,1,0" TMUX_PANE="$2" CLAUDE_PID="$3" CLAUDE_CODE_ENTRYPOINT=cli "$TLS" hook
+}
+geom() { $T list-panes -t "$1" -F '#{pane_left},#{pane_top},#{pane_width}x#{pane_height}' | tr '\n' ' '; }
+gone_pane() { ! $T list-panes -a -F '#{pane_id}' | grep -qx "$1"; }
+no_session() { ! $T has-session -t "$1" 2>/dev/null; }
+bring_back() { TLS_TMUX="-L $SRV" TLS_CLAUDE="echo claude" "$TLS" resume "$1" >/dev/null; }
+$T new-session -d -s gamma -x 160 -y 40 "sleep 600"
+G1=$($T display -p -t gamma '#{pane_id}')
+G2=$($T split-window -d -h -P -F '#{pane_id}' -t "$G1" "sleep 600")
+$T split-window -d -v -t "$G2"   # a plain pane (cat)
+sleep 600 & FAKE5=$!
+sleep 600 & FAKE6=$!
+agent_in $SID5 "$G1" $FAKE5 SessionStart '"source":"startup"'
+agent_in $SID6 "$G2" $FAKE6 SessionStart '"source":"startup"'
+agent_in $SID6 "$G2" $FAKE6 Stop '"last_assistant_message":"Fixed it.\n\nShould I land it?","background_tasks":[]'
+check "a session with two agents has a row of its own" 'view | grep -qE "^ *gamma *$"'
+check "its agents have a row each under it, by name, else Claude's title" \
+  'view | grep -qE "^ +○ idle +fixer +[0-9]+s$" && view | grep -qE "^ +● waiting +Rebase the stack +[0-9]+s  Should I land it\?$"'
+
+P=$(term "'$HERE/ttop'")
+retry shows "$P" "▌1 *alpha"
+$TT send-keys -t "$P" Down Down Down
+check "ttop selects an agent under its session" 'retry shows "$P" "▌ .*fixer"'
+$TT send-keys -t "$P" DC
+check "Delete asks before it kills an agent" 'retry shows "$P" "delete agent fixer (kills its pane)?"'
+$TT send-keys -t "$P" Enter
+check "enter kills the agent's pane" 'retry gone_pane "$G1"'
+agent_in $SID5 "$G1" $FAKE5 SessionEnd '"reason":"other"'
+check "the deleted agent stays out of the list, even after its last hooks" \
+  '[ -n "$(SID=$SID5 field "[\"deleted\"]")" ] && ! view | grep -q fixer'
+kill "$FAKE5"; wait "$FAKE5" 2>/dev/null
+
+view >/dev/null   # saves gamma's structure, now without the deleted pane
+GEOM=$(geom gamma)
+$T kill-session -t gamma; kill "$FAKE6"; wait "$FAKE6" 2>/dev/null
+check "ttop lists the dead agent under its session's name" 'retry shows "$P" "gamma .*✕ was waiting .*Rebase the stack"'
+bring_back "${SID6:0:8}"
+check "a killed session comes back with its splits" '[ "$(geom gamma)" = "$GEOM" ]'
+NEW=$($T list-panes -t gamma -F '#{pane_id}' | head -1)
+check "the agent resumes in its own pane; the other pane is a plain shell" \
+  'retry shows_in "$NEW" "claude --resume $SID6" && ! $T capture-pane -p -t gamma:0.1 | grep -q resume'
+
+sleep 600 & FAKE6=$!
+agent_in $SID6 "$NEW" $FAKE6 SessionStart '"source":"resume"'
+$T kill-pane -t "$NEW"; kill "$FAKE6"; wait "$FAKE6" 2>/dev/null
+view >/dev/null
+bring_back "${SID6:0:8}"
+check "a closed agent pane is split back into its window, same layout" \
+  '[ "$($T list-windows -t gamma | wc -l)" = 1 ] && [ "$(geom gamma)" = "$GEOM" ]'
+check "and the agent resumes there" 'retry shows_in gamma:0.0 "claude --resume $SID6"'
+
+$T new-session -d -s delta -x 160 -y 40 "env PS1='$ ' sh"
+D1=$($T display -p -t delta '#{pane_id}')
+sleep 600 & FAKE7=$!
+agent_in $SID7 "$D1" $FAKE7 SessionStart '"source":"startup"'
+kill "$FAKE7"; wait "$FAKE7" 2>/dev/null
+bring_back "${SID7:0:8}"
+check "an agent whose pane sits at a shell prompt resumes right there" \
+  'retry shows_in "$D1" "^claude --resume $SID7" && [ "$($T list-panes -s -t delta | wc -l)" = 1 ]'
+
+retry shows "$P" " 3 *delta"   # ttop refreshes once a second: keys go to the rows it shows
+$TT send-keys -t "$P" Home Down Down
+check "ttop selects the delta session" 'retry shows "$P" "▌3 *delta"'
+$TT send-keys -t "$P" BSpace
+check "Backspace asks before it kills a session" 'retry shows "$P" "delete session delta: 1 pane, 0 agents?"'
+$TT send-keys -t "$P" Escape
+check "esc keeps the session" 'retry shows "$P" cancelled && $T has-session -t delta'
+$TT send-keys -t "$P" BSpace Enter
+check "enter kills the session" 'retry no_session delta'
+$TT send-keys -t "$P" q
+
+# tmux-agents.bash. Session names match exactly: on its own, tmux resolves "pf"
+# to "pfx" when there's no "pf", so t opened, trm killed and tmv refused the
+# wrong session.
+LIB="$HERE/tmux-agents.bash"; [ -f "$LIB" ] || LIB="$HERE/../shell/tmux-agents.bash"
+lib() {  # lib CODE: run bash CODE with tmux-agents.bash loaded, against the test server
+  bash --norc --noprofile -c "tmux() { command tmux -L $SRV \"\$@\"; }; . '$LIB'; $1"
+}
+letters() {  # tls has one adjective and one noun per letter
+  /usr/bin/python3 -I -S -B - "$TLS" <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tls", sys.argv[1])
+tls = importlib.util.module_from_spec(importlib.util.spec_from_loader("tls", loader))
+loader.exec_module(tls)
+abc = "abcdefghijklmnopqrstuvwxyz"
+sys.exit(not all("".join(sorted(w[0] for w in ws)) == abc for ws in (tls.ADJECTIVES, tls.NOUNS)))
+PY
+}
+check "session names: one adjective and one noun per letter" 'letters'
+NAME=$(TLS_TMUX="-L $SRV" "$TLS" new-name)
+check "new-name prints a free adjective-noun name" '[[ $NAME =~ ^[a-z]+-[a-z]+$ ]] && no_session "$NAME"'
+$T new-session -d -s pfxlong "sleep 600"
+lib 'trm pfx' 2>/dev/null
+check "trm leaves alone a session whose name only starts with it" '$T has-session -t =pfxlong'
+lib 'tmv pfxlong pfx' >/dev/null 2>&1
+check "tmv takes a name that only starts another session's name" '$T has-session -t =pfx && no_session pfxlong'
+printf '%s\n' "tmux() { command tmux -L $SRV \"\$@\"; }" ". '$LIB'" "t pf" > "$D/t-outside"
+term "bash --norc --noprofile '$D/t-outside'" >/dev/null
+check "t outside tmux opens the exact session, creating it" 'retry client_on pf && $T has-session -t =pfx'
+$T detach-client -s pf
+$T new-session -d -s zzlong "sleep 600"
+printf '%s\n' "tls() { '$TLS' \"\$@\"; }" ". '$LIB'" "t zz" > "$D/t-inside"
+$T new-window -d -t beta: "bash --norc --noprofile '$D/t-inside'"
+check "t inside tmux switches to the exact session, creating it" 'retry client_on zz'
+printf '%s\n' "tls() { '$TLS' \"\$@\"; }" ". '$LIB'" "t" > "$D/t-new"
+$T new-window -d -t zz: "bash --norc --noprofile '$D/t-new'"
+check "t with no name opens a new adjective-noun session" 'retry new_client >/dev/null'
+NEW=$(new_client)
+$T switch-client -c "$($T list-clients -F '#{client_name}' | head -1)" -t beta
+for s in pf pfx zz zzlong "$NEW"; do $T kill-session -t "=$s" 2>/dev/null; done
+# tmux_autostart on a terminal: tmux in its session; the shell ends with tmux.
+printf '%s\n' "tmux() { command tmux -L $SRV \"\$@\"; }" ". '$LIB'" "tmux_autostart autost" > "$D/autostart"
+A=$($TT new-window -d -P -F '#{pane_id}' -t term: "env -u TMUX TERM=xterm-256color bash --norc --noprofile -i '$D/autostart'")
+check "tmux_autostart puts a terminal in its session" 'retry client_on autost'
+$T detach-client -s autost
+check "and its shell ends when tmux detaches" 'retry exited_ok "$A"'
+$T kill-session -t =autost
+
+# The agent-neutral interface: any agent reports with tls report.
+SID9=codex-0001
+$T new-session -d -s eps -x 160 -y 40 "sleep 600"
+E1=$($T display -p -t eps '#{pane_id}')
+sleep 600 & FAKE9=$!
+rep() { TMUX="$SOCK,1,0" TMUX_PANE="$E1" "$TLS" report "$@"; }
+rep id=$SID9 agent=codex pid=$FAKE9 state=busy prompt="port the parser" name=porter resume="codex resume $SID9"
+check "report: any agent shows up, by name, with its prompt" 'view | grep -qE "^eps +◐ busy +porter +[0-9]+s  > port the parser$"'
+printf '{"id": "%s", "state": "waiting", "summary": "Push to main?"}' $SID9 | rep
+check "report: one JSON object on stdin works too" 'view | grep -qE "^eps +● waiting +porter .*  Push to main\?$"'
+rep id=$SID9 state=finished message="Pushed. Want me to also tag a release?"
+check "report: finished lets tls tell done from waiting" 'view | grep -qE "^eps +● done +porter .*  Pushed. Want me to also tag a release\?$"'
+check "report: a bad report is refused, with the reason" \
+  'out=$("$TLS" report id=$SID9 state=sleepy 2>&1); [ $? = 2 ] && [[ $out == *"state must be"* ]]'
+kill "$FAKE9"; wait "$FAKE9" 2>/dev/null
+check "report: a dead agent waits under its session" 'view | grep -qE "^eps +✕ was done +porter"'
+bring_back "$SID9"
+check "report: bringing it back types the resume command it reported" 'retry shows_in eps:1 "codex resume $SID9"'
+rep id=$SID9 end=deliberate
+check "report: end=deliberate drops the session" '[ ! -e "$D/state/$SID9.json" ]'
+$T kill-session -t =eps
+check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
+
+# tls setup in a fake $HOME: merges the hooks without disturbing others,
+# comments out the old alias, and a rerun changes nothing.
+H="$D/home"; mkdir -p "$H/.claude"
+cat > "$H/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/other/hook.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "verbose": true
+}
+JSON
+printf '%s\n' 'export A=1' "alias tls='tmux list-sessions'" > "$H/.bashrc"
+setup() { HOME="$H" TLS_TMUX="-L $SRV" "$TLS" setup; }
+settings_ok() {
+  /usr/bin/python3 -IS - "$H/.claude/settings.json" "$TLS hook" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+h = c["hooks"]
+mine = {ev: [x for g in gs for x in g["hooks"] if x["command"] == sys.argv[2]] for ev, gs in h.items()}
+assert sorted(ev for ev, m in mine.items() if len(m) == 1) == sorted(
+    "PermissionRequest SessionStart UserPromptSubmit PostToolUse Notification Stop StopFailure SessionEnd PreToolUse".split()), mine
+assert h["PermissionRequest"][0]["hooks"][0]["command"] == "/opt/other/hook.sh"
+assert h["PreToolUse"][-1]["matcher"] == "AskUserQuestion|ExitPlanMode"
+assert c["verbose"] is True
+PY
+}
+out=$(setup)
+check "setup merges the Claude hooks, keeps the others" 'settings_ok'
+check "setup backs up settings.json" '[ "$(ls "$H/.claude" | grep -c "^settings.json.bak-tls-")" = 1 ]'
+check "setup comments out the alias" 'grep -q "^# tls is .*Was: alias tls='"'"'tmux list-sessions'"'"'$" "$H/.bashrc" && ! grep -q "^alias tls=" "$H/.bashrc"'
+check "setup registers the tmux hooks" 'echo "$out" | grep -q "registered on the running tmux server"'
+cp "$H/.claude/settings.json" "$D/settings.before"; cp "$H/.bashrc" "$D/bashrc.before"
+out=$(setup)
+check "setup again changes nothing" 'cmp -s "$H/.claude/settings.json" "$D/settings.before" && cmp -s "$H/.bashrc" "$D/bashrc.before" && [ "$(ls "$H/.claude" | grep -c "^settings.json.bak-tls-")" = 1 ] && echo "$out" | grep -q "already in"'
+echo '{"hooks": ' > "$H/.claude/settings.json"
+out=$(setup)
+check "setup leaves broken JSON alone" 'echo "$out" | grep -q "left alone" && [ "$(cat "$H/.claude/settings.json")" = "{\"hooks\": " ]'
+
+echo
+[ "$fails" -eq 0 ] && echo "all passed" || echo "$fails failed"
+exit "$fails"
