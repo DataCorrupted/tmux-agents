@@ -25,10 +25,10 @@ said or asked. Dead agents group by the session they ran in. Narrow windows
 shrink the names and the summary to fit.
 
 Vertical (-v), for a narrow and tall window: a line with each session's key
-and name; under it, for each agent, a line with its dot, status, name (up to
-7 columns) and age, then a line with its summary in a lighter color. Too
-narrow a window drops the status word first (the dot's color says it too),
-then the age.
+and name; under it, for each agent, a line with its dot, status, name and age,
+then a line with its summary in a lighter color. When the lines cannot hold
+it all, the status words go first (the dot's color says it too), then the
+names get cut, then the age goes.
 
 ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
 selected session or agent pane (switch inside tmux, attach outside; detaching
@@ -1130,24 +1130,24 @@ def row_line(r, cols, width, color, live=False, selected=False):
     return BAR + text + " " * room if selected and color else text.rstrip()
 
 
-NAME_V = 7  # vertical layout: the columns an agent's name gets at most
-
-
 def columns_v(rows, width, live):
     """Vertical layout: (status, agent name, age) widths for the agent lines of
-    rows, one section of the list. The status word keeps the room of the
-    longest one (waiting, blocked), so a change of state moves nothing. When
-    the name can't have 4 columns, the status word goes first (the dot's color
-    says it too), then the age."""
+    rows, one section of the list, so that its columns line up. Everything if
+    it fits: the status words and the whole names. Else the status words go
+    first (the dot's color says it too), then the names get cut, down to 4
+    columns, and then the age goes."""
     cells = [r for r in rows if r["state"]]
-    status = max([7] + [width_of(state_word(r)) for r in cells])
+    status = max([0] + [width_of(state_word(r)) for r in cells])
     names = max([0] + [width_of(r["label"]) for r in cells])
-    room = width - (1 if live else 0) - 3  # the selection mark, the indent, the dot and a space
-    for show_word, show_age in ((True, True), (False, True), (False, False)):
-        name = min(NAME_V, names, room - (status + 1 if show_word else 0) - (4 if show_age else 0))
-        if name >= min(4, names):
-            break
-    return (status if show_word else 0), max(0, name), show_age
+    room = width - (1 if live else 0) - 2  # after the selection mark, the indent and the dot
+    name = names + 1 if names else 0  # a space and the name
+    if status + 1 + name + 4 <= room:  # " status", " name", " age"
+        return status, names, True
+    if name + 4 <= room:
+        return 0, names, True
+    if room - 5 >= min(4, names):
+        return 0, room - 5, True
+    return 0, max(0, room - 1), False
 
 
 def row_lines_v(r, cols, width, color, live=False, selected=False):

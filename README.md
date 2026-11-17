@@ -116,25 +116,26 @@ the default, shows it horizontally. `tls -v` prints the vertical list once. For 
 pane of 20 columns at the left side of a window, run `tmux split-window -hb -l 20 ttop -v`.
 
 Each session has a line with its key and its name. Under it, each agent has two lines. The
-first line has its dot, status, name (7 columns at most) and age. The second line has its
-summary, in a lighter color. When the window is too narrow, the status word goes first,
-because the dot shows the state too. Then the age goes. The left sample has 24 columns,
-and the right sample has 20 columns:
+first line has its dot, status, name and age. The second line has its summary, in a
+lighter color. If the window is too narrow for all of it, the status words go first,
+because the dot shows the state too. Then the names get shorter, and then the age goes.
+The samples have 28, 20 and 16 columns:
 
 ```
-ttop · 11:22:25             ttop · 11:22:25
+ttop · myhost · 11:22:25       ttop · 11:22:25        ttop · 11:22:25
 
- 1 api*                      1 api*
-  ◐ busy    fix-au…  1m       ◐ fix-au…  1m
-  > Run the integratio…       > Run the integr…
-▌ ● waiting docs-u… 12m     ▌ ● docs-u… 12m
-▌ Should I open the PR?     ▌ Should I open th…
- 2 infra                     2 infra
-  ● done    myagent  2h       ● myagent  2h
-  Plan applied: 3 reso…       Plan applied: 3 …
- 3 scratch                   3 scratch
+ 1 api*                         1 api*                 1 api*
+  ◐ busy    fix-auth     1m      ◐ fix-auth     1m      ◐ fix-au…  1m
+  > Run the integration te…      > Run the integr…      > Run the in…
+▌ ● waiting docs-update 12m    ▌ ● docs-update 12m    ▌ ● docs-u… 12m
+▌ Should I open the PR?        ▌ Should I open th…    ▌ Should I ope…
+ 2 infra                        2 infra                2 infra
+  ● done    myagent      2h      ● myagent      2h      ● myagent  2h
+  Plan applied: 3 resource…      Plan applied: 3 …      Plan applied…
+ 3 scratch                      3 scratch              3 scratch
 
-↑↓ enter n del R q          ↑↓ enter n del R q
+↑↓ enter n del R q             ↑↓ enter n del R q     ↑↓ enter n del
+                                                      R q
 ```
 
 To make the vertical layout the default, add `alias tt='ttop -v'` to `~/.bashrc`, after

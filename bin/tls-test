@@ -263,17 +263,20 @@ check "its agents have a row each under it, by name, else Claude's title" \
   'view | grep -qE "^ +○ idle +fixer +[0-9]+s$" && view | grep -qE "^ +● waiting +Rebase the stack +[0-9]+s  Should I land it\?$"'
 
 # Vertical (-v), for a narrow window: a line with the session's name; under it,
-# for each agent, a line with its dot, status, name (7 columns at most) and age,
-# then its summary. Too narrow: the status word goes first, then the age.
+# for each agent, a line with its dot, status, name and age, then its summary.
+# Too narrow: the status words go first, then the names get cut, then the age.
 vview() { COLUMNS=$1 TLS_TMUX="-L $SRV" "$TLS" -v; }
 widest() { /usr/bin/python3 -IS -c 'import sys; print(max(len(l) for l in sys.stdin.buffer.read().decode().splitlines()))'; }
-check "tls -v: a session's name has a line of its own" 'vview 20 | grep -qx gamma'
-check "tls -v: under it, a line for each agent: dot, status, name, age" \
-  'vview 20 | grep -qE "^ ○ idle +fixer +[0-9]+[smhd]$" && vview 20 | grep -qE "^ ● waiting Reba… +[0-9]+[smhd]$"'
+check "tls -v: a session's name has a line of its own" 'vview 40 | grep -qx gamma'
+check "tls -v: under it, a line for each agent: dot, status, whole name, age" \
+  'vview 40 | grep -qE "^ ○ idle +fixer +[0-9]+[smhd]$" && vview 40 | grep -qE "^ ● waiting Rebase the stack +[0-9]+[smhd]$"'
 check "tls -v: then the agent's summary, on a line of its own" \
-  'vview 20 | grep -A1 "● waiting" | grep -qx " Should I land it?"'
-check "tls -v: no line is wider than the window" '[ "$(vview 20 | widest)" -le 20 ]'
-check "tls -v in 12 columns: the status word goes first, the dot stays" \
+  'vview 40 | grep -A1 "● waiting" | grep -qx " Should I land it?"'
+check "tls -v in 24 columns: the status words go first, and the names stay whole" \
+  'vview 24 | grep -qE "^ ● Rebase the stack +[0-9]+[smhd]$" && [ "$(vview 24 | widest)" -le 24 ]'
+check "tls -v in 20 columns: then the names get cut" \
+  'vview 20 | grep -qE "^ ● Rebase the s… +[0-9]+[smhd]$" && [ "$(vview 20 | widest)" -le 20 ]'
+check "tls -v in 12 columns: still the dot, a name and the age" \
   'vview 12 | grep -qE "^ ○ fixer +[0-9]+[smhd]$" && [ "$(vview 12 | widest)" -le 12 ]'
 V=$($TT new-session -d -P -F '#{pane_id}' -s narrow -x 20 -y 30 \
   "env -u TMUX TLS_STATE_DIR='$D/state' TLS_TMUX='-L $SRV' '$HERE/ttop' -v")
@@ -281,11 +284,11 @@ check "ttop -v in a 20-column pane: each agent's lines go under its session" \
   'retry shows "$V" "^  ○ fixer  *[0-9][0-9]*[smhd]$" && shows "$V" "^  Should I land it?$" && shows "$V" "^ttop · [0-9:]*$"'
 $TT send-keys -t "$V" Home Down Down Down Down
 check "ttop -v: the bar covers all the lines of the selected agent" \
-  'retry shows "$V" "^▌ ● Rebase…" && $TT capture-pane -ep -t "$V" | grep "Should I land it" | grep -q "48;5;237"'
+  'retry shows "$V" "^▌ ● Rebase the…" && $TT capture-pane -ep -t "$V" | grep "Should I land it" | grep -q "48;5;237"'
 $TT resize-window -t narrow -y 9   # room for 5 lines of the list
 # tmux drops the top lines of a pane it makes shorter: until ttop draws again,
 # the old screen has no title, and it can look right.
-short_ok() { shows "$V" "^ttop · " && shows "$V" "^▌ ● Rebase…" && shows "$V" "Should I land it?" && ! shows "$V" alpha; }
+short_ok() { shows "$V" "^ttop · " && shows "$V" "^▌ ● Rebase the…" && shows "$V" "Should I land it?" && ! shows "$V" alpha; }
 check "ttop -v in a short pane: scrolling keeps all the lines of the selected agent in view" 'retry short_ok'
 $TT send-keys -t "$V" q
 check "ttop -v: q quits" 'retry exited_ok "$V"'
