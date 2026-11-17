@@ -375,8 +375,9 @@ rep id=$SID9 state=finished message="Pushed. Want me to also tag a release?"
 check "report: finished lets tls tell done from waiting" 'view | grep -qE "^eps +● done +porter .*  Pushed. Want me to also tag a release\?$"'
 check "report: a bad report is refused, with the reason" \
   'out=$("$TLS" report id=$SID9 state=sleepy 2>&1); [ $? = 2 ] && [[ $out == *"state must be"* ]]'
+rep id=$SID9 state=busy
 kill "$FAKE9"; wait "$FAKE9" 2>/dev/null
-check "report: a dead agent waits under its session" 'view | grep -qE "^eps +✕ was done +porter"'
+check "report: a dead agent waits under its session, as was busy (the live word)" 'view | grep -qE "^eps +✕ was busy +porter"'
 bring_back "$SID9"
 check "report: bringing it back types the resume command it reported" 'retry shows_in eps:1 "codex resume $SID9"'
 rep id=$SID9 end=deliberate

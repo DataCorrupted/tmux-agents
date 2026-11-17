@@ -1,10 +1,10 @@
 #!/usr/bin/python3 -IS
-"""tls: tmux sessions plus the status of the Claude Code agents running in them.
+"""tls: tmux sessions and the status of the AI agents in them.
 
   tls                 print the list once, like ps
   ttop                the same list live and interactive, like top (= tls top)
   tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
-                      splits, `claude --resume` in each dead agent's pane
+                      splits, and each dead agent's resume command in its pane
   tls forget ID       drop a dead agent from the list
   tls new-name        print a free adjective-noun session name (for `t` and n)
   tls report id=ID [key=value ...]
@@ -18,9 +18,10 @@
 Columns: session, dot and status, agent name, age, summary. A session with one
 agent is one row. A session with no agent or several has a row of its own, and
 its agents get a row each under it, from the status column on. An agent's name
-is the one /rename gave it, else Claude's title for the conversation; the
-summary is what it last said or asked. Dead agents group by the session they
-ran in. Narrow windows shrink the names and the summary to fit.
+is the one its user gave it (in Claude Code: /rename), else the agent's title
+for the conversation, else its kind, such as codex; the summary is what it last
+said or asked. Dead agents group by the session they ran in. Narrow windows
+shrink the names and the summary to fit.
 
 ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
 selected session or agent pane (switch inside tmux, attach outside; detaching
@@ -977,8 +978,9 @@ def build_rows(snap, live=False):
                                  action=act, recs=recs))
             for rec in recs:
                 resuming = resume_cmd(rec) and rec not in todo
+                was = rec.get("state") or "?"  # in the live rows' words: "busy", not "working"
                 row = dict(BLANK, id=("dead", rec["session_id"]), kind="dead", state="gone",
-                           state_text="resuming…" if resuming else "was " + (rec.get("state") or "?"),
+                           state_text="resuming…" if resuming else "was " + STATE_TEXT.get(was, was),
                            age=rec.get("event_at"), label=label(rec),
                            detail="> " + rec["prompt"] if rec.get("prompt") else rec.get("reason") or "",
                            where=(rec.get("tmux") or {}).get("session") or "", recs=[rec],

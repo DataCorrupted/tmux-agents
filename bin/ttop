@@ -1,5 +1,5 @@
 #!/bin/sh
-# ttop: tls's tmux sessions and Claude agents, live and interactive, like top.
+# ttop: tls's tmux sessions and AI agents, live and interactive, like top.
 # Up/Down select, Enter switches to the session, n new session, Del deletes, q
 # quits; `tls -h` for the rest. A regular file, not a symlink: dotfile syncers
 # often skip symlinks.
