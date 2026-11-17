@@ -8,7 +8,8 @@
 #                      free adjective-noun name (from `tls new-name`)
 #   trm NAME...        kill sessions
 #   tmv [OLD] NEW      rename session OLD, or this one, to NEW
-#   tt                 ttop: live list of the sessions and their agents
+#   tt [-v]            ttop: live list of the sessions and their agents; -v
+#                      vertical, for a narrow window
 #   tmux-doctor        tmux client and server versions, when tmux misbehaves
 #   tmux-cache-clean   drop cached tmux clients that no server needs any more
 #

@@ -1,8 +1,9 @@
 #!/usr/bin/python3 -IS
 """tls: tmux sessions and the status of the AI agents in them.
 
-  tls                 print the list once, like ps
-  ttop                the same list live and interactive, like top (= tls top)
+  tls [-v]            print the list once, like ps; -v: vertically
+  ttop [-v | -h]      the same list live and interactive, like top (= tls top);
+                      -v vertical, for a narrow window; -h horizontal (default)
   tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
                       splits, and each dead agent's resume command in its pane
   tls forget ID       drop a dead agent from the list
@@ -22,6 +23,12 @@ is the one its user gave it (in Claude Code: /rename), else the agent's title
 for the conversation, else its kind, such as codex; the summary is what it last
 said or asked. Dead agents group by the session they ran in. Narrow windows
 shrink the names and the summary to fit.
+
+Vertical (-v), for a narrow and tall window: a line with each session's key
+and name; under it, for each agent, a line with its dot, status, name (up to
+7 columns) and age, then a line with its summary in a lighter color. Too
+narrow a window drops the status word first (the dot's color says it too),
+then the age.
 
 ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
 selected session or agent pane (switch inside tmux, attach outside; detaching
@@ -1034,14 +1041,16 @@ def dim(s, color):
 
 
 def paint(segs, width, color):
-    """(text, 256-color or None) segments as one line at most width columns
-    wide, cut with an ellipsis. Returns the line and the columns left over.
-    Colors end with 39m (foreground only) so a selection bar survives them."""
+    """(text, 256-color, "dim" or None) segments as one line at most width
+    columns wide, cut with an ellipsis. Returns the line and the columns left
+    over. Colors end with 39m or 22m, not 0m, so a selection bar survives them."""
     out, room = [], width
     for text, hue in segs:
         text = fit(text, room)
         room -= sum(map(char_width, text))
-        out.append("\033[38;5;%dm%s\033[39m" % (hue, text) if color and hue is not None and text else text)
+        if color and hue is not None and text:
+            text = "\033[2m%s\033[22m" % text if hue == "dim" else "\033[38;5;%dm%s\033[39m" % (hue, text)
+        out.append(text)
     return "".join(out), room
 
 
@@ -1121,22 +1130,92 @@ def row_line(r, cols, width, color, live=False, selected=False):
     return BAR + text + " " * room if selected and color else text.rstrip()
 
 
-def body_lines(rows, width, color, live=False, sel=None):
-    """The lines for rows, and {row index: line index} for scrolling."""
-    cols = columns(rows, width, live)
+NAME_V = 7  # vertical layout: the columns an agent's name gets at most
+
+
+def columns_v(rows, width, live):
+    """Vertical layout: (status, agent name, age) widths for the agent lines of
+    rows, one section of the list. The status word keeps the room of the
+    longest one (waiting, blocked), so a change of state moves nothing. When
+    the name can't have 4 columns, the status word goes first (the dot's color
+    says it too), then the age."""
+    cells = [r for r in rows if r["state"]]
+    status = max([7] + [width_of(state_word(r)) for r in cells])
+    names = max([0] + [width_of(r["label"]) for r in cells])
+    room = width - (1 if live else 0) - 3  # the selection mark, the indent, the dot and a space
+    for show_word, show_age in ((True, True), (False, True), (False, False)):
+        name = min(NAME_V, names, room - (status + 1 if show_word else 0) - (4 if show_age else 0))
+        if name >= min(4, names):
+            break
+    return (status if show_word else 0), max(0, name), show_age
+
+
+def row_lines_v(r, cols, width, color, live=False, selected=False):
+    """The vertical layout of row r: a line with [ttop: the selection mark and
+    the key, then] the session's name; for an agent, a line with its dot,
+    status, name and age, then a line with its summary in a lighter color. A
+    selected row has the bar on all its lines."""
+    status_w, name_w, show_age = cols
+    mark = ("▌" if selected else " ") if live else ""
+
+    def line(segs):
+        text, room = paint(segs, width, color)
+        return BAR + text + " " * room if selected and color else text.rstrip()
+    out = []
+    if r["name"]:
+        key = (r["key"] or " ") + " " if live else ""
+        name = r["name"] + ("*" if r["attached"] else "")
+        out.append(line([(mark + key + fit_middle(name, width - width_of(mark + key)), None)]))
+    if r["state"]:
+        st = r["state"]
+        word = " " + pad(state_word(r), status_w) if status_w else ""
+        segs = [(mark + " ", None), (GLYPH.get(st, " ") + word + " ", COLOR.get(st))]
+        if name_w:
+            segs.append((pad(r["label"], name_w) + (" " if show_age else ""), None))
+        if show_age:
+            segs.append(("%3s" % ago(r["age"]), None))
+        out.append(line(segs))
+        if r["detail"]:
+            out.append(line([(mark + " ", None), (r["detail"], "dim")]))
+    return out
+
+
+def body_lines(rows, width, color, live=False, sel=None, vertical=False):
+    """The lines for rows, and {row index: (first line, last line)} for
+    scrolling. Vertical: each section of the list sizes its own columns, and
+    a section heading keeps only its name, such as "dead"."""
+    if vertical:
+        cols, part = {}, []
+        for i, r in enumerate(rows + [{"section": ""}]):
+            if "section" in r:
+                cols.update(dict.fromkeys(part, columns_v([rows[j] for j in part], width, live)))
+                part = []
+            else:
+                part.append(i)
+    else:
+        cols = columns(rows, width, live)
     lines, at = [], {}
     for i, r in enumerate(rows):
         if "section" in r:
-            lines += ["", dim(fit("── %s ──" % r["section"], width), color)]
-        else:
-            at[i] = len(lines)
-            lines.append(row_line(r, cols, width, color, live, i == sel))
-    return lines or ["  (no tmux sessions)"], at
+            head = re.split(r" \(| · ", r["section"])[0] if vertical else r["section"]
+            lines += ["", dim(fit("── %s ──" % head, width), color)]
+            continue
+        new = (row_lines_v(r, cols[i], width, color, live, i == sel) if vertical
+               else [row_line(r, cols, width, color, live, i == sel)])
+        at[i] = (len(lines), len(lines) + len(new) - 1)
+        lines += new
+    return lines or [fit("  (no tmux sessions)", width)], at
 
 
-def title(snap, name, color):
-    head = "%s · %s · %s" % (name, HOST.split(".")[0], time.strftime("%H:%M:%S"))
-    return dim(head if snap["server"] else head + " · no tmux server", color)
+def title(snap, name, color, width=0):
+    """name · host · time, and a note when there's no tmux server. A narrow
+    window drops the host, then the time."""
+    clock, note = time.strftime("%H:%M:%S"), [] if snap["server"] else ["no tmux server"]
+    for parts in ([name, HOST.split(".")[0], clock], [name, clock], [name], []):
+        head = " · ".join(parts + note)
+        if not width or width_of(head) <= width:
+            break
+    return dim(fit(head, width) if width else head, color)
 
 
 # ── actions ──────────────────────────────────────────────────────────────────
@@ -1446,16 +1525,18 @@ def find(prefix):
     return hits[0] if len(hits) == 1 else None
 
 
-def one_shot():
+def one_shot(vertical=False):
     snap = snapshot()
     rows, _ = build_rows(snap)
     color = sys.stdout.isatty()
-    lines, _ = body_lines(rows, shutil.get_terminal_size((160, 24)).columns, color)
-    print("\n".join([title(snap, "tls", color), ""] + lines))
+    width = shutil.get_terminal_size((160, 24)).columns
+    lines, _ = body_lines(rows, width, color, vertical=vertical)
+    print("\n".join([title(snap, "tls", color, width), ""] + lines))
     return 0
 
 
 HINT = "↑↓ select · enter or 1-9 open/resume · n new session · del delete · R resume all dead · q quit · * attached"
+HINT_V = "↑↓ enter n del R q"  # the vertical layout's, for a narrow window
 DEL = ("\x7f", "\x08", "\033[3~")  # Backspace (the Mac delete key), ^H, forward Delete
 NAV = {"\033[A": "up", "\033OA": "up", "\033[B": "down", "\033OB": "down",
        "\033[5~": "pgup", "\033[6~": "pgdn",
@@ -1482,7 +1563,14 @@ def read_keys(fd):
     return re.findall(r"\033\[[0-9;?]*[ -/]*[@-~]|\033O.|\033.?|.", buf.decode(errors="ignore"), re.S)
 
 
-def ttop():
+def wrap(text, width, most):
+    """text as lines of at most width columns, at most `most` of them."""
+    import textwrap
+    lines = textwrap.wrap(text, max(1, width), max_lines=most, placeholder="…")
+    return [fit(l, width) for l in lines] or [""]
+
+
+def ttop(vertical=False):
     import select
     import termios
     import tty
@@ -1519,18 +1607,20 @@ def ttop():
                     sel = None
             size = shutil.get_terminal_size((100, 30))
             width = size.columns - 1  # stay off the last column: no autowrap
-            body, at = body_lines(rows, width, True, live=True, sel=sel)
-            foot = ["", dim(fit(msg if time.time() < msg_until else HINT, width), True)]
+            body, at = body_lines(rows, width, True, live=True, sel=sel, vertical=vertical)
+            text = msg if time.time() < msg_until else HINT_V if vertical else HINT
+            foot = [""] + [dim(l, True) for l in (wrap(text, width, 4) if vertical else [fit(text, width)])]
             room = max(1, size.lines - 2 - len(foot))
-            if sel is not None:  # scroll the selection into view
-                y, starts = at[sel], set(at.values())
-                if y < top:
-                    top = y
-                    while top > 0 and top - 1 not in starts and y - top + 1 < room:
+            if sel is not None:  # scroll the selection, all its lines, into view
+                y0, y1 = at[sel]
+                row_ys = {y for a, b in at.values() for y in range(a, b + 1)}
+                if y0 < top:
+                    top = y0
+                    while top > 0 and top - 1 not in row_ys and y1 - top + 1 < room:
                         top -= 1  # bring its section heading along
-                top = max(top, y - room + 1)
+                top = min(max(top, y1 - room + 1), y0)
             top = max(0, min(top, len(body) - room))
-            lines = ([title(snap, "ttop", True), ""] + body[top:top + room] + foot)[:size.lines]
+            lines = ([title(snap, "ttop", True, width), ""] + body[top:top + room] + foot)[:size.lines]
             out.write("\033[H" + "\n".join(l + "\033[K\033[0m" for l in lines) + "\033[J")
             out.flush()
             if not select.select([fd], [], [], max(0, refresh_at - time.time()))[0]:
@@ -1554,7 +1644,7 @@ def ttop():
                     return 0
                 if k in NAV:
                     if picks:
-                        page = max(1, room - 1)
+                        page = max(1, (room - 1) // (3 if vertical else 1))  # in rows; vertical: ~3 lines each
                         step = {"up": -1, "down": 1, "pgup": -page, "pgdn": page,
                                 "home": -len(picks), "end": len(picks)}[NAV[k]]
                         j = picks.index(sel) + step if sel in picks else 0
@@ -1656,9 +1746,16 @@ def main(argv):
     if cmd == "new-name":
         print(session_name((tmux("list-sessions", "-F", "#{session_name}") or "").splitlines()))
         return 0
-    if cmd == "top":  # ttop
-        return ttop() if sys.stdin.isatty() and sys.stdout.isatty() else one_shot()
-    if cmd not in ("", "-1"):  # -1: what plain tls did before ttop existed
+    if cmd == "top":  # ttop [-v | -h]: here -h is horizontal, and --help the help
+        vertical = {(): False, ("-h",): False, ("--horizontal",): False,
+                    ("-v",): True, ("--vertical",): True}.get(tuple(argv[1:]))
+        if vertical is None:
+            print(__doc__.strip())
+            return 0 if argv[1:] == ["--help"] else 2
+        return ttop(vertical) if sys.stdin.isatty() and sys.stdout.isatty() else one_shot(vertical)
+    if argv in (["-v"], ["--vertical"]):
+        return one_shot(vertical=True)
+    if cmd not in ("", "-1", "--horizontal"):  # -1: what plain tls did before ttop existed
         print(__doc__.strip())
         return 0 if cmd in ("-h", "--help") else 2
     return one_shot()

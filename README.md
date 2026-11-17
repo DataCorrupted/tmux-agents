@@ -8,9 +8,9 @@ ttop · myhost · 11:22:25
 
  1 api*
            ◐ busy    fix-auth      1m  > Run the integration tests again
-           ● waiting docs-update  12m  Should I open the PR?
- 2 scratch
- 3 infra   ● done    myagent       2h  Plan applied: 3 resources changed.
+▌          ● waiting docs-update  12m  Should I open the PR?
+ 2 infra   ● done    myagent       2h  Plan applied: 3 resources changed.
+ 3 scratch
 
 ↑↓ select · enter or 1-9 open/resume · n new session · del delete · R resume all dead · q quit · * attached
 ```
@@ -31,7 +31,7 @@ tmux-agents fixes both problems.
 
 - **A live list.** `ttop` (or `tt`) shows your tmux sessions and their agents, as `top`
   shows processes. Each agent has a state, a name, an age and a summary: its question, its
-  blocker or its result.
+  blocker or its result. For a narrow window, `ttop -v` shows the list vertically.
 - **One key to go there.** Press the key of a row, or select the row and press Enter. Inside
   tmux, ttop switches your terminal to that session. Outside tmux, ttop attaches to it.
   Detach to come back to ttop.
@@ -94,6 +94,8 @@ Two options are not in the default install:
 
 ## Use
 
+### ttop
+
 | ttop key | Action |
 | --- | --- |
 | ↑ ↓ Home End PgUp PgDn | Select a row. |
@@ -107,12 +109,45 @@ Two options are not in the default install:
 
 `tls` prints the same list once, as `ps` does. `tls -h` shows all commands.
 
+### Vertical layout
+
+`ttop -v` (or `tt -v`) shows the list vertically, for a narrow and tall window. `ttop -h`,
+the default, shows it horizontally. `tls -v` prints the vertical list once. For a ttop
+pane of 20 columns at the left side of a window, run `tmux split-window -hb -l 20 ttop -v`.
+
+Each session has a line with its key and its name. Under it, each agent has two lines. The
+first line has its dot, status, name (7 columns at most) and age. The second line has its
+summary, in a lighter color. When the window is too narrow, the status word goes first,
+because the dot shows the state too. Then the age goes. The left sample has 24 columns,
+and the right sample has 20 columns:
+
+```
+ttop · 11:22:25             ttop · 11:22:25
+
+ 1 api*                      1 api*
+  ◐ busy    fix-au…  1m       ◐ fix-au…  1m
+  > Run the integratio…       > Run the integr…
+▌ ● waiting docs-u… 12m     ▌ ● docs-u… 12m
+▌ Should I open the PR?     ▌ Should I open th…
+ 2 infra                     2 infra
+  ● done    myagent  2h       ● myagent  2h
+  Plan applied: 3 reso…       Plan applied: 3 …
+ 3 scratch                   3 scratch
+
+↑↓ enter n del R q          ↑↓ enter n del R q
+```
+
+To make the vertical layout the default, add `alias tt='ttop -v'` to `~/.bashrc`, after
+the line for `tmux-agents.bash`.
+
+### Shell helpers
+
 | Shell helper | Action |
 | --- | --- |
 | `t [NAME]` | Go to session NAME: switch to it inside tmux, attach to it outside. If there is no session NAME, make it. With no NAME, make a session with a free name. |
 | `trm NAME...` | Kill sessions. |
 | `tmv [OLD] NEW` | Rename session OLD, or the current session, to NEW. |
-| `tt` | Run `ttop`. |
+| `tt` | Run `ttop`. `tt -v` runs `ttop -v`. |
 | `tmux-doctor` | Show the versions of the tmux client and the tmux server. Use it when tmux fails after an upgrade. |
 | `tmux-cache-clean` | Delete the copies of old tmux clients that no server needs. |
 | `tmux_autostart [NAME]` | On an interactive terminal outside tmux, attach to session NAME (default `main`). Exit the shell when tmux detaches. |
@@ -180,7 +215,7 @@ The comments at the top of `bin/tls` give more detail.
 ## Tests
 
 ```sh
-bin/tls-test     # about 90 checks on throwaway tmux servers
+bin/tls-test     # about 100 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux
