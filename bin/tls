@@ -26,9 +26,10 @@ shrink the names and the summary to fit.
 
 Vertical (-v), for a narrow and tall window: a line with each session's key
 and name; under it, for each agent, a line with its dot, status, name and age,
-then a line with its summary in a lighter color. When the lines cannot hold
-it all, the status words go first (the dot's color says it too), then the
-names get cut, then the age goes.
+then its summary in a lighter color. The summaries wrap onto more lines while
+the whole list fits in the window, and get one line each when it does not.
+When the agent lines cannot hold it all, the status words go first (the dot's
+color says it too), then the names get cut, then the age goes.
 
 ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
 selected session or agent pane (switch inside tmux, attach outside; detaching
@@ -1150,11 +1151,20 @@ def columns_v(rows, width, live):
     return 0, max(0, room - 1), False
 
 
-def row_lines_v(r, cols, width, color, live=False, selected=False):
+def summary_lines(text, width, most=None):
+    """A summary wrapped to width for the vertical layout, on `most` lines at
+    most, the last one cut with … if there is more. A prompt goes on under its
+    text, not under its ">"."""
+    if not text.strip():
+        return []
+    return wrap(text, width, most, "  " if text.startswith("> ") else "")
+
+
+def row_lines_v(r, cols, width, color, live=False, selected=False, most=1):
     """The vertical layout of row r: a line with [ttop: the selection mark and
     the key, then] the session's name; for an agent, a line with its dot,
-    status, name and age, then a line with its summary in a lighter color. A
-    selected row has the bar on all its lines."""
+    status, name and age, then its summary in a lighter color, on `most` lines
+    at most. A selected row has the bar on all its lines."""
     status_w, name_w, show_age = cols
     mark = ("▌" if selected else " ") if live else ""
 
@@ -1175,15 +1185,17 @@ def row_lines_v(r, cols, width, color, live=False, selected=False):
         if show_age:
             segs.append(("%3s" % ago(r["age"]), None))
         out.append(line(segs))
-        if r["detail"]:
-            out.append(line([(mark + " ", None), (r["detail"], "dim")]))
+        for text in summary_lines(r["detail"], width - width_of(mark) - 1, most):
+            out.append(line([(mark + " ", None), (text, "dim")]))
     return out
 
 
-def body_lines(rows, width, color, live=False, sel=None, vertical=False):
+def body_lines(rows, width, color, live=False, sel=None, vertical=False, height=0):
     """The lines for rows, and {row index: (first line, last line)} for
-    scrolling. Vertical: each section of the list sizes its own columns, and
-    a section heading keeps only its name, such as "dead"."""
+    scrolling. Vertical: each section of the list sizes its own columns, a
+    section heading keeps only its name, such as "dead", and the summaries
+    wrap: on all the lines they need, or on fewer for all of them, down to
+    one, until the list fits in height lines (0: no limit)."""
     if vertical:
         cols, part = {}, []
         for i, r in enumerate(rows + [{"section": ""}]):
@@ -1194,17 +1206,27 @@ def body_lines(rows, width, color, live=False, sel=None, vertical=False):
                 part.append(i)
     else:
         cols = columns(rows, width, live)
-    lines, at = [], {}
-    for i, r in enumerate(rows):
-        if "section" in r:
-            head = re.split(r" \(| · ", r["section"])[0] if vertical else r["section"]
-            lines += ["", dim(fit("── %s ──" % head, width), color)]
-            continue
-        new = (row_lines_v(r, cols[i], width, color, live, i == sel) if vertical
-               else [row_line(r, cols, width, color, live, i == sel)])
-        at[i] = (len(lines), len(lines) + len(new) - 1)
-        lines += new
-    return lines or [fit("  (no tmux sessions)", width)], at
+
+    def draw(most):
+        lines, at = [], {}
+        for i, r in enumerate(rows):
+            if "section" in r:
+                head = re.split(r" \(| · ", r["section"])[0] if vertical else r["section"]
+                lines += ["", dim(fit("── %s ──" % head, width), color)]
+                continue
+            new = (row_lines_v(r, cols[i], width, color, live, i == sel, most) if vertical
+                   else [row_line(r, cols, width, color, live, i == sel)])
+            at[i] = (len(lines), len(lines) + len(new) - 1)
+            lines += new
+        return lines or [fit("  (no tmux sessions)", width)], at
+
+    room = width - (1 if live else 0) - 1  # a summary line's, after the selection mark and the indent
+    most = max([len(summary_lines(r["detail"], room)) for r in rows if vertical and r.get("state")] + [1])
+    lines, at = draw(most)
+    while height and most > 1 and len(lines) > height:
+        most -= 1
+        lines, at = draw(most)
+    return lines, at
 
 
 def title(snap, name, color, width=0):
@@ -1529,9 +1551,12 @@ def one_shot(vertical=False):
     snap = snapshot()
     rows, _ = build_rows(snap)
     color = sys.stdout.isatty()
-    width = shutil.get_terminal_size((160, 24)).columns
-    lines, _ = body_lines(rows, width, color, vertical=vertical)
-    print("\n".join([title(snap, "tls", color, width), ""] + lines))
+    size = shutil.get_terminal_size((160, 24))
+    # Vertical summaries fit a terminal, or LINES, with a line left for the
+    # shell's prompt; a pipe gets them whole.
+    height = size.lines - 3 if color or os.environ.get("LINES") else 0
+    lines, _ = body_lines(rows, size.columns, color, vertical=vertical, height=height)
+    print("\n".join([title(snap, "tls", color, size.columns), ""] + lines))
     return 0
 
 
@@ -1563,11 +1588,17 @@ def read_keys(fd):
     return re.findall(r"\033\[[0-9;?]*[ -/]*[@-~]|\033O.|\033.?|.", buf.decode(errors="ignore"), re.S)
 
 
-def wrap(text, width, most):
-    """text as lines of at most width columns, at most `most` of them."""
+def wrap(text, width, most=None, hang=""):
+    """text as lines of at most width columns, at most `most` of them (None:
+    no limit); the lines after the first start with hang."""
     import textwrap
-    lines = textwrap.wrap(text, max(1, width), max_lines=most, placeholder="…")
-    return [fit(l, width) for l in lines] or [""]
+    width = max(1, width)
+    hang = hang if len(hang) < width else ""
+    lines = [fit(l, width) for l in textwrap.wrap(text, width, subsequent_indent=hang)] or [""]
+    if most and len(lines) > most:  # not textwrap's max_lines: a long word left it a line of just "…"
+        lines = lines[:most]
+        lines[-1] = fit(lines[-1] + "…", width)
+    return lines
 
 
 def ttop(vertical=False):
@@ -1607,10 +1638,10 @@ def ttop(vertical=False):
                     sel = None
             size = shutil.get_terminal_size((100, 30))
             width = size.columns - 1  # stay off the last column: no autowrap
-            body, at = body_lines(rows, width, True, live=True, sel=sel, vertical=vertical)
             text = msg if time.time() < msg_until else HINT_V if vertical else HINT
             foot = [""] + [dim(l, True) for l in (wrap(text, width, 4) if vertical else [fit(text, width)])]
             room = max(1, size.lines - 2 - len(foot))
+            body, at = body_lines(rows, width, True, live=True, sel=sel, vertical=vertical, height=room)
             if sel is not None:  # scroll the selection, all its lines, into view
                 y0, y1 = at[sel]
                 row_ys = {y for a, b in at.values() for y in range(a, b + 1)}

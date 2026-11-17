@@ -265,7 +265,7 @@ check "its agents have a row each under it, by name, else Claude's title" \
 # Vertical (-v), for a narrow window: a line with the session's name; under it,
 # for each agent, a line with its dot, status, name and age, then its summary.
 # Too narrow: the status words go first, then the names get cut, then the age.
-vview() { COLUMNS=$1 TLS_TMUX="-L $SRV" "$TLS" -v; }
+vview() { env -u LINES COLUMNS=$1 ${2:+LINES=$2} TLS_TMUX="-L $SRV" "$TLS" -v; }   # vview WIDTH [HEIGHT]
 widest() { /usr/bin/python3 -IS -c 'import sys; print(max(len(l) for l in sys.stdin.buffer.read().decode().splitlines()))'; }
 check "tls -v: a session's name has a line of its own" 'vview 40 | grep -qx gamma'
 check "tls -v: under it, a line for each agent: dot, status, whole name, age" \
@@ -278,6 +278,17 @@ check "tls -v in 20 columns: then the names get cut" \
   'vview 20 | grep -qE "^ ● Rebase the s… +[0-9]+[smhd]$" && [ "$(vview 20 | widest)" -le 20 ]'
 check "tls -v in 12 columns: still the dot, a name and the age" \
   'vview 12 | grep -qE "^ ○ fixer +[0-9]+[smhd]$" && [ "$(vview 12 | widest)" -le 12 ]'
+check "tls -v in 12 columns: a summary goes on over more lines" \
+  '[ "$(vview 12 | grep -A2 "^ ● Reba" | tail -n 2 | tr "\n" "|")" = " Should I| land it?|" ]'
+check "tls -v in a short window: each summary gets one line, cut with …" \
+  '[ "$(vview 12 5 | grep -A1 "^ ● Reba" | tail -n 1)" = " Should I…" ]'
+wrap_py() {  # wrap_py TEXT WIDTH MOST HANG: tls's wrap(), its lines joined with |
+  /usr/bin/python3 -ISB -c 'import importlib.machinery as m, importlib.util as u, sys
+l = m.SourceFileLoader("tls", sys.argv[1]); t = u.module_from_spec(u.spec_from_loader("tls", l)); l.exec_module(t)
+print("|".join(t.wrap(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5])))' "$TLS" "$@"
+}
+check "a summary cut in a long word shows the start of the word, not a line of just …" \
+  '[ "$(wrap_py "> someone@host:~\$ nohup ~/rebranch/scripts/snapshot_watch.sh" 23 2 "  ")" = "> someone@host:~\$ nohup|  ~/rebranch/scripts/s…" ]'
 V=$($TT new-session -d -P -F '#{pane_id}' -s narrow -x 20 -y 30 \
   "env -u TMUX TLS_STATE_DIR='$D/state' TLS_TMUX='-L $SRV' '$HERE/ttop' -v")
 check "ttop -v in a 20-column pane: each agent's lines go under its session" \
@@ -403,6 +414,8 @@ sleep 600 & FAKE9=$!
 rep() { TMUX="$SOCK,1,0" TMUX_PANE="$E1" "$TLS" report "$@"; }
 rep id=$SID9 agent=codex pid=$FAKE9 state=busy prompt="port the parser" name=porter resume="codex resume $SID9"
 check "report: any agent shows up, by name, with its prompt" 'view | grep -qE "^eps +◐ busy +porter +[0-9]+s  > port the parser$"'
+check "tls -v: a prompt goes on under its text, not under its >" \
+  'vview 12 | grep -qx " > port the" && vview 12 | grep -qx "   parser"'
 printf '{"id": "%s", "state": "waiting", "summary": "Push to main?"}' $SID9 | rep
 check "report: one JSON object on stdin works too" 'view | grep -qE "^eps +● waiting +porter .*  Push to main\?$"'
 rep id=$SID9 state=finished message="Pushed. Want me to also tag a release?"
