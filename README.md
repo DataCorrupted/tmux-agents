@@ -31,7 +31,8 @@ tmux-agents fixes both problems.
 
 - **A live list.** `ttop` (or `tt`) shows your tmux sessions and their agents, as `top`
   shows processes. Each agent has a state, a name, an age and a summary: its question, its
-  blocker or its result. For a narrow window, `ttop -v` shows the list vertically.
+  blocker or its result. In a narrow or tall window, ttop shows the list vertically. With
+  `-f`, ttop sizes its tmux pane to the list.
 - **One key to go there.** Press the key of a row, or select the row and press Enter. Inside
   tmux, ttop switches your terminal to that session. Outside tmux, ttop attaches to it.
   Detach to come back to ttop.
@@ -114,9 +115,11 @@ Two options are not in the default install:
 
 ### Vertical layout
 
-`ttop -v` (or `tt -v`) shows the list vertically, for a narrow and tall window. `ttop -h`,
-the default, shows it horizontally. `tls -v` prints the vertical list once. For a ttop
-pane of 20 columns at the left side of a window, run `tmux split-window -hb -l 20 ttop -v`.
+ttop picks its layout by itself: vertical in a window under 60 columns or taller than wide
+(in pixels), and horizontal in other windows. It picks again when the window changes size.
+`ttop -v` (or `tt -v`) always shows the list vertically, and `ttop -h` always
+horizontally. `tls -v` prints the vertical list once. For a ttop pane at the left side of
+a window, run `tmux split-window -hb -l 20 'ttop -f'`.
 
 Each session has a line with its key and its name. Under it, each agent has a line with
 its dot, status, name and age, and then its summary in a lighter color. The summaries wrap
@@ -147,8 +150,22 @@ ttop · myhost · 11:22:25    │ ttop · 11:22:25     │ ttop · 11:22:25
                             │                     │ R q
 ```
 
-To make the vertical layout the default, add `alias tt='ttop -v'` to `~/.bashrc`, after
+To always get one layout, add `alias tt='ttop -v'` (or `ttop -h`) to `~/.bashrc`, after
 the line for `tmux-agents.bash`.
+
+### Fit
+
+`ttop -f` (or `tt -f`) sizes its own tmux pane to the list, with no space left over. It
+does this again each time the list or the pane changes: a new agent, a session that goes,
+or a drag of the pane's edge.
+
+- A vertical ttop gets as wide as its lines with whole names and status words: 16 to 40
+  columns, and a third of the window at most. It keeps room for the longest status word,
+  so a change of state does not resize it.
+- A horizontal ttop gets as high as the list and its title: 2 lines to a third of the
+  window.
+
+Outside tmux, `-f` does nothing. The preset bars use it.
 
 ### Presets
 
@@ -161,9 +178,9 @@ wide window (21:9)                      other windows (16:9, 16:10)
 ┌────────────┬────────────┬─────────┐   ┌─────────────┬─────────────┐
 │            │            │ ttop -v │   │             │             │
 │   shell    │   shell    │         │   │    shell    │    shell    │
-│            │            │ 25 cols │   │             │             │
-│            │            │         │   ├─────────────┴─────────────┤
-└────────────┴────────────┴─────────┘   │ ttop, 5 to 10 lines       │
+│            │            │ fits    │   │             │             │
+│            │            │ the list│   ├─────────────┴─────────────┤
+└────────────┴────────────┴─────────┘   │ ttop -h, fits the list    │
                                         └───────────────────────────┘
 ```
 
@@ -172,8 +189,10 @@ have room for two 80-column panes next to the bar. If tmux does not know the pix
 a cell, tls takes a cell as twice as high as wide. To choose the layout yourself, set
 `TLS_PRESET=right` or `TLS_PRESET=bottom`.
 
-The bar runs `ttop -p`, so its `n` key also makes sessions in the preset layout. Start
-ttop with `-p` (`tt -p`, `tt -v -p`) to get this `n` in other places too. `tls preset`
+The bar starts at 25 columns, or at 5 to 10 lines. Then its ttop fits it to the list (see
+[Fit](#fit)), and the two panes share each change of the bar's size. The bar runs
+`ttop -p`, so its `n` key also makes sessions in the preset layout. Start ttop with `-p`
+(`tt -p`, `tt -v -p`) to get this `n` in other places too. `tls preset`
 gives the preset layout to a window with one pane, for example a new window in a session.
 When tls rebuilds a session after a reboot, ttop starts again in its bar. In a window of
 less than 12 lines, such as the bottom bar, ttop has no blank lines, and its key hint is
@@ -189,7 +208,7 @@ To use the presets each time, add `alias t='t -p'` and `alias tt='ttop -p'` to
 | `t [-p] [NAME]` | Go to session NAME: switch to it inside tmux, attach to it outside. If there is no session NAME, make it. With no NAME, make a session with a free name. With `-p`, a new session gets the preset layout. |
 | `trm NAME...` | Kill sessions. |
 | `tmv [OLD] NEW` | Rename session OLD, or the current session, to NEW. |
-| `tt` | Run `ttop`. `tt -v` runs `ttop -v`. |
+| `tt` | Run `ttop`, with the same options: `tt -v`, `tt -h`, `tt -f`, `tt -p`. |
 | `tmux-doctor` | Show the versions of the tmux client and the tmux server. Use it when tmux fails after an upgrade. |
 | `tmux-cache-clean` | Delete the copies of old tmux clients that no server needs. |
 | `tmux_autostart [NAME]` | On an interactive terminal outside tmux, attach to session NAME (default `main`). Exit the shell when tmux detaches. |
@@ -263,7 +282,7 @@ The comments at the top of `bin/tls` give more detail.
 ## Tests
 
 ```sh
-bin/tls-test     # about 120 checks on throwaway tmux servers
+bin/tls-test     # about 130 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux

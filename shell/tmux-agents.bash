@@ -9,8 +9,9 @@
 #                      new session gets the preset layout (`tls preset`)
 #   trm NAME...        kill sessions
 #   tmv [OLD] NEW      rename session OLD, or this one, to NEW
-#   tt [-v]            ttop: live list of the sessions and their agents; -v
-#                      vertical, for a narrow window
+#   tt [-v|-h] [-f]    ttop: live list of the sessions and their agents,
+#                      vertical or horizontal by the window's shape, or as -v
+#                      or -h says; -f: ttop fits its tmux pane to the list
 #   tmux-doctor        tmux client and server versions, when tmux misbehaves
 #   tmux-cache-clean   drop cached tmux clients that no server needs any more
 #
