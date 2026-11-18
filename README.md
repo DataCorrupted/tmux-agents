@@ -72,8 +72,9 @@ tmux-agents fixes both problems.
 AGENTS.md." [AGENTS.md](AGENTS.md) gives the steps and the checks. It also tells the agent
 which changes need your OK.
 
-**Do it yourself.** You need Linux, tmux 3.0 or newer, bash, and Python 3.7 or newer at
-`/usr/bin/python3`.
+**Do it yourself.** You need Linux or macOS, tmux 3.0 or newer, bash, and Python 3.7 or
+newer at `/usr/bin/python3`. On macOS, Homebrew has tmux (`brew install tmux`), and the
+Xcode Command Line Tools have `/usr/bin/python3` (`xcode-select --install`).
 
 ```sh
 git clone <repo URL> ~/tmux-agents
@@ -81,6 +82,10 @@ cd ~/tmux-agents
 ./install.sh                                          # installs into ~/.local/bin
 echo '. ~/.local/bin/tmux-agents.bash' >> ~/.bashrc
 ```
+
+On macOS, Terminal and tmux start bash as a login shell. A login shell reads
+`~/.bash_profile`, not `~/.bashrc`. If your `~/.bash_profile` does not load `~/.bashrc`,
+add the line `. ~/.bashrc` to it.
 
 The installer copies `tls`, `ttop`, `ttv`, `tth`, `tls-test` and `tmux-agents.bash` into
 `~/.local/bin`, and the settings file `tls.conf` into `~/.config/tmux-agents/` (only if you

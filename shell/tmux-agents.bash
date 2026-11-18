@@ -111,32 +111,45 @@ complete -F _tmux_sessions t trm tmv
 # --------------------------------------------------------------------------
 # Tmux upgrade resilience
 #
-# An in-place tmux upgrade (dnf/yum/apt) swaps out /usr/bin/tmux while the
-# running tmux server keeps executing the old, now-deleted binary. A newer
+# An in-place tmux upgrade (dnf/yum/apt, brew) swaps out the tmux binary while
+# the running tmux server keeps executing the old, now-deleted binary. A newer
 # client cannot finish the attach handshake with an older server, so every new
 # attach fails with "open terminal failed: not a terminal" -- and paired with
 # `exec` that takes the whole login down.
 #
-# Fix: a server's own binary stays readable through /proc even after the file is
-# deleted, so cache a copy keyed by version and attach with a matching client.
+# Fix: cache a copy of the server's own binary keyed by version, and attach with
+# a matching client. On Linux that binary stays readable through /proc even
+# after the file is deleted; macOS has no /proc, so there the copy works only
+# while the old binary is still on disk.
 # Heals with no manual step and stops engaging once the versions agree again.
 # --------------------------------------------------------------------------
 TMUX_CLIENT_CACHE="${TMUX_CLIENT_CACHE:-$HOME/.local/share/tmux-clients}"
 
 _tmux_server_pid() {
-    ps -u "$(id -u)" -o pid=,comm= 2>/dev/null | awk '/tmux: server/ {print $1; exit}'
+    tmux display-message -p '#{pid}' 2>/dev/null
+}
+
+# A file that reads as the binary of the server with pid $1: on Linux
+# /proc/PID/exe, which still reads after the file is deleted; elsewhere the file
+# the server runs from, as lsof names it.
+_tmux_server_exe() {
+    if [ -r "/proc/$1/exe" ]; then
+        printf '/proc/%s/exe' "$1"
+    else
+        lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+    fi
 }
 
 # Cache the running server's own binary under its version, if not already saved.
 _tmux_cache_server_binary() {
-    local ver=$1 pid tmp
+    local ver=$1 pid exe tmp
     [ -n "$ver" ] || return 1
     [ -x "$TMUX_CLIENT_CACHE/tmux-$ver" ] && return 0
     pid=$(_tmux_server_pid)
-    [ -n "$pid" ] && [ -r "/proc/$pid/exe" ] || return 1
+    [ -n "$pid" ] && exe=$(_tmux_server_exe "$pid") && [ -r "$exe" ] || return 1
     mkdir -p "$TMUX_CLIENT_CACHE" 2>/dev/null || return 1
     tmp="$TMUX_CLIENT_CACHE/.tmux-$ver.$$"
-    if cp "/proc/$pid/exe" "$tmp" 2>/dev/null && chmod +x "$tmp" 2>/dev/null; then
+    if cp "$exe" "$tmp" 2>/dev/null && chmod +x "$tmp" 2>/dev/null; then
         mv -f "$tmp" "$TMUX_CLIENT_CACHE/tmux-$ver" 2>/dev/null && return 0
     fi
     rm -f "$tmp" 2>/dev/null
@@ -165,13 +178,14 @@ _tmux_client_for_server() {
 
 # Show tmux client/server state; run this first when tmux starts misbehaving.
 tmux-doctor() {
-    local srv cli pid
+    local srv cli pid exe
     cli=$(tmux -V 2>/dev/null | awk '{print $2}')
     srv=$(tmux display-message -p '#{version}' 2>/dev/null)
     pid=$(_tmux_server_pid)
     printf 'client binary : %s (%s)\n' "${cli:-<none>}" "$(command -v tmux || echo 'not installed')"
     printf 'running server: %s%s\n' "${srv:-<none running>}" "${pid:+ (pid $pid)}"
-    [ -n "$pid" ] && printf 'server exe    : %s\n' "$(readlink "/proc/$pid/exe" 2>/dev/null)"
+    [ -n "$pid" ] && exe=$(_tmux_server_exe "$pid") \
+        && printf 'server exe    : %s\n' "$(readlink "$exe" 2>/dev/null || printf '%s' "$exe")"
     if [ -n "$srv" ] && [ "$srv" != "$cli" ]; then
         printf 'status        : MISMATCH -> would attach using %s\n' "$(_tmux_client_for_server)"
     else
