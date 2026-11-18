@@ -3,9 +3,10 @@
 #   . /path/to/tmux-agents.bash
 #   tmux_autostart main      # optional: interactive terminals start in tmux
 #
-#   t [NAME]           switch to session NAME (inside tmux) or attach to it,
+#   t [-p] [NAME]      switch to session NAME (inside tmux) or attach to it,
 #                      creating it if needed; no NAME: a new session with a
-#                      free adjective-noun name (from `tls new-name`)
+#                      free adjective-noun name (from `tls new-name`); -p: a
+#                      new session gets the preset layout (`tls preset`)
 #   trm NAME...        kill sessions
 #   tmv [OLD] NEW      rename session OLD, or this one, to NEW
 #   tt [-v]            ttop: live list of the sessions and their agents; -v
@@ -19,13 +20,26 @@
 
 alias tt='ttop'
 
-# t [NAME]: switch to or attach to session NAME, creating it if needed.
+# t [-p] [NAME]: switch to or attach to session NAME, creating it if needed;
+# with -p, a new session gets the preset layout.
 t() {
+    local preset= w h
+    while [ "$1" = -p ] || [ "$1" = --preset ]; do preset=1; shift; done   # alias t='t -p' adds one
     local name=${1:-$(command -v tls >/dev/null && tls new-name 2>/dev/null)}
-    if [ -n "$TMUX" ]; then
-        if [ -z "$name" ] || ! tmux has-session -t "=$name" 2>/dev/null; then
+    if [ -z "$name" ] || ! tmux has-session -t "=$name" 2>/dev/null; then
+        if [ -n "$preset" ]; then  # made at the size it gets here, so that showing it resizes nothing
+            if [ -n "$TMUX" ]; then
+                read -r w h <<< "$(tmux display -p '#{window_width} #{window_height}')"
+            else
+                w=$(tput cols 2>/dev/null || echo 80) h=$(tput lines 2>/dev/null || echo 24)
+            fi
+            name=$(tmux new-session -d -P -F '#{session_name}' ${name:+-s "$name"} -x "$w" -y "$h") || return
+            tls preset "=$name:"
+        elif [ -n "$TMUX" ]; then
             name=$(tmux new-session -d -P -F '#{session_name}' ${name:+-s "$name"}) || return
         fi
+    fi
+    if [ -n "$TMUX" ]; then
         tmux switch-client -t "=$name"
     else
         "$(_tmux_client_for_server)" new-session -A ${name:+-s "$name"}

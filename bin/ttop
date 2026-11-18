@@ -1,7 +1,7 @@
 #!/bin/sh
-# ttop [-v | -h]: tls's tmux sessions and AI agents, live and interactive, like
-# top; -v vertical, for a narrow window, -h horizontal (the default). Up/Down
-# select, Enter switches to the session, n new session, Del deletes, q quits;
-# `ttop --help` for the rest. A regular file, not a symlink: dotfile syncers
-# often skip symlinks.
+# ttop [-v | -h] [-p]: tls's tmux sessions and AI agents, live and interactive,
+# like top; -v vertical, for a narrow window, -h horizontal (the default); -p:
+# n makes new sessions in the preset layout. Up/Down select, Enter switches to
+# the session, n new session, Del deletes, q quits; `ttop --help` for the rest.
+# A regular file, not a symlink: dotfile syncers often skip symlinks.
 exec "$(dirname "$(readlink -f "$0")")/tls" top "$@"

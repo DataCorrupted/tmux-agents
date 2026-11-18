@@ -17,7 +17,7 @@ retry() { for _ in $(seq 25); do "$@" && return 0; sleep 0.2; done; return 1; }
 field() { /usr/bin/python3 -IS -c "import json,sys; r=json.load(open(sys.argv[1])); print(r$1)" "$D/state/$SID.json" 2>/dev/null; }
 cleanup() {
   $T kill-server 2>/dev/null; $TT kill-server 2>/dev/null
-  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE9:-} 2>/dev/null
+  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE8:-} ${FAKE9:-} 2>/dev/null
   rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SRV}_term"
   rm -rf "$D"
 }
@@ -296,7 +296,7 @@ check "ttop -v in a 20-column pane: each agent's lines go under its session" \
 $TT send-keys -t "$V" Home Down Down Down Down
 check "ttop -v: the bar covers all the lines of the selected agent" \
   'retry shows "$V" "^▌ ● Rebase the…" && $TT capture-pane -ep -t "$V" | grep "Should I land it" | grep -q "48;5;237"'
-$TT resize-window -t narrow -y 9   # room for 5 lines of the list
+$TT resize-window -t narrow -y 6   # room for 5 lines of the list: a short window has no blank lines
 # tmux drops the top lines of a pane it makes shorter: until ttop draws again,
 # the old screen has no title, and it can look right.
 short_ok() { shows "$V" "^ttop · " && shows "$V" "^▌ ● Rebase the…" && shows "$V" "Should I land it?" && ! shows "$V" alpha; }
@@ -430,6 +430,63 @@ check "report: bringing it back types the resume command it reported" 'retry sho
 rep id=$SID9 end=deliberate
 check "report: end=deliberate drops the session" '[ ! -e "$D/state/$SID9.json" ]'
 $T kill-session -t =eps
+
+# Presets: a bar with ttop, and the rest of the window in two panes side by
+# side. A wide window (21:9) gets the bar on the right, 25 columns, with ttop -v;
+# another window gets it at the bottom, 5 to 10 lines high.
+panes_of() { $T list-panes -t "=$1:" -F '#{pane_left},#{pane_top} #{pane_width}x#{pane_height} #{pane_active} #{pane_start_command}'; }
+side_by_side() {  # side_by_side SESSION: two panes besides the bar, as wide as each other, the first one active
+  panes_of "$1" | grep -v ttop | awk '{split($2, s, "x"); w[NR] = s[1]; a[NR] = $3}
+    END {d = w[1] - w[2]; exit !(NR == 2 && d * d <= 1 && a[1] == 1)}'
+}
+preset() { TLS_TMUX="-L $SRV" "$TLS" preset "$@"; }
+$T new-session -d -s wide -x 300 -y 60 "sleep 600"
+preset =wide:
+check "preset in a wide window: a 25-column bar on the right with ttop -v, two panes besides it" \
+  '[ "$(panes_of wide | wc -l)" = 3 ] && panes_of wide | grep -qE "^275,0 25x60 0 .*ttop.? -v -p" && side_by_side wide'
+$T new-session -d -s std -x 200 -y 56 "sleep 600"
+preset =std:
+check "preset in a 16:9 window: a 10-line bar at the bottom with ttop, two panes above it" \
+  '[ "$(panes_of std | wc -l)" = 3 ] && panes_of std | grep -qE "^0,46 200x10 0 .*ttop.? -p\"$" && side_by_side std'
+$T new-session -d -s forced -x 300 -y 60 "sleep 600"
+TLS_PRESET=bottom preset =forced:
+check "TLS_PRESET=bottom puts the bar at the bottom of a wide window too, and tells its ttop" \
+  'panes_of forced | grep -qE "^0,50 300x10 0 .*TLS_PRESET=bottom .*ttop.? -p"'
+check "preset leaves alone a window with more than one pane" \
+  'out=$(preset =wide: 2>&1); [ $? = 1 ] && [[ $out == *"a preset needs a window with one"* ]] && [ "$(panes_of wide | wc -l)" = 3 ]'
+for s in wide std forced; do $T kill-session -t "=$s"; done
+printf '%s\n' "tls() { '$TLS' \"\$@\"; }" ". '$LIB'" "t -p prez" > "$D/t-preset"
+$T new-window -d -t beta: "bash --norc --noprofile '$D/t-preset'"
+check "t -p makes a new session in the preset layout, at this window's size, and switches to it" \
+  'retry client_on prez && [ "$(panes_of prez | wc -l)" = 3 ] && side_by_side prez && panes_of prez | grep -qE "^0,32 160x7 0 .*ttop.? -p"'
+$T switch-client -c "$($T list-clients -F '#{client_name}' | head -1)" -t beta
+$T kill-session -t =prez
+TP=$($T new-window -P -F '#{pane_id}' -t beta: "env TLS_STATE_DIR='$D/state' '$HERE/ttop' -p")
+retry shows_in "$TP" "▌1"
+$T send-keys -t "$TP" n
+check "ttop -p: n makes its new session in the preset layout" \
+  'retry new_client >/dev/null && [ "$(panes_of "$(new_client)" | wc -l)" = 3 ]'
+NEW=$(new_client)
+$T switch-client -c "$($T list-clients -F '#{client_name}' | head -1)" -t beta
+$T kill-session -t "=$NEW"; $T kill-pane -t "$TP"
+B=$($TT new-session -d -P -F '#{pane_id}' -s bar -x 200 -y 8 \
+  "env -u TMUX TLS_STATE_DIR='$D/state' TLS_TMUX='-L $SRV' '$HERE/ttop'")
+check "ttop in an 8-line bar: the key hint on the title line, and no blank lines" \
+  'retry shows "$B" "^ttop · .* · ↑↓ select" && [ -n "$($TT capture-pane -p -t "$B" | sed -n 2p)" ]'
+$TT kill-session -t bar
+SID8=88888888-9999-aaaa-bbbb-cccccccccccc
+: > "$D/t8.jsonl"
+$T new-session -d -s pre -x 300 -y 60 "sleep 600"
+preset =pre:
+sleep 600 & FAKE8=$!
+agent_in $SID8 "$($T display -p -t =pre: '#{pane_id}')" $FAKE8 SessionStart '"source":"startup"'
+view >/dev/null   # saves pre's structure, the bar too
+PGEOM=$(geom pre)
+$T kill-session -t =pre; kill "$FAKE8"; wait "$FAKE8" 2>/dev/null
+bring_back "${SID8:0:8}"
+check "a rebuilt preset session gets its splits back, and ttop in its bar" \
+  '[ "$(geom pre)" = "$PGEOM" ] && panes_of pre | grep -qE "^275,0 25x60 .*ttop.? -v -p"'
+$T kill-session -t =pre
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,

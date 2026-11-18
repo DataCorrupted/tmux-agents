@@ -2,12 +2,15 @@
 """tls: tmux sessions and the status of the AI agents in them.
 
   tls [-v]            print the list once, like ps; -v: vertically
-  ttop [-v | -h]      the same list live and interactive, like top (= tls top);
-                      -v vertical, for a narrow window; -h horizontal (default)
+  ttop [-v | -h] [-p] the same list live and interactive, like top (= tls top);
+                      -v vertical, for a narrow window; -h horizontal (default);
+                      -p: n makes its new sessions in the preset layout
   tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
                       splits, and each dead agent's resume command in its pane
   tls forget ID       drop a dead agent from the list
   tls new-name        print a free adjective-noun session name (for `t` and n)
+  tls preset [WINDOW] give a window with one pane (default: this one) the
+                      preset layout: a bar with ttop, two panes side by side
   tls report id=ID [key=value ...]
                       report an agent's state, from any agent; or one JSON object
                       on stdin (the interface: docs/interface.md)
@@ -31,14 +34,24 @@ the whole list fits in the window, and get one line each when it does not.
 When the agent lines cannot hold it all, the status words go first (the dot's
 color says it too), then the names get cut, then the age goes.
 
+Presets (t -p, ttop -p, tls preset): a wide window, such as on a 21:9 monitor
+(2.25:1 in pixels or wider, with room for two 80-column panes), gets a bar of
+25 columns on the right with ttop -v; any other window (16:9, 16:10) gets a
+bar of 5 to 10 lines at the bottom with ttop. The rest of the window splits
+into two panes side by side. TLS_PRESET=right or bottom picks one. When tmux
+does not know the cell size in pixels, tls takes a cell as twice as high as
+wide. A rebuilt session gets ttop back in its bar.
+
 ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
 selected session or agent pane (switch inside tmux, attach outside; detaching
 comes back here), brings back a dead agent's session, or marks a green agent
 outside tmux (VS Code) seen · 1-9 open a session at its most urgent agent or
 bring back a dead one · n opens a new session (adjective-noun name, current
-directory: like `t`) · Del or Backspace deletes the selected session, agent or
-dead agent (Enter confirms) · R brings back all dead agents · d forgets a dead
-agent: the selected one, or press its key · q quit.
+directory: like `t`; with -p in the preset layout, like `t -p`) · Del or
+Backspace deletes the selected session, agent or dead agent (Enter confirms) ·
+R brings back all dead agents · d forgets a dead agent: the selected one, or
+press its key · q quit. In a window of under 12 lines, such as the bottom bar,
+ttop leaves out its blank lines and puts the key hint on the title line.
 
 Dots: red blocked · yellow waiting on you · green done, not looked at yet ·
 blue busy (hollow: turn over, background task still running) · grey idle ·
@@ -650,12 +663,12 @@ def guarded(fn, *args):
 
 PANE_FIELDS = ("socket", "server", "session", "attached", "window_id", "window", "window_name",
                "auto_name", "window_active", "width", "height", "layout", "pane", "index",
-               "active", "cwd", "cmd", "title")
+               "active", "cwd", "cmd", "start", "title")
 PANE_FORMAT = "\t".join(("#{socket_path}", SERVER_ID, "#{session_name}", "#{session_attached}",
                          "#{window_id}", "#{window_index}", "#{window_name}", "#{automatic-rename}",
                          "#{window_active}", "#{window_width}", "#{window_height}", "#{window_layout}",
                          "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_path}",
-                         "#{pane_current_command}", "#{pane_title}"))
+                         "#{pane_current_command}", "#{pane_start_command}", "#{pane_title}"))
 
 
 def list_panes(server=None):
@@ -672,10 +685,30 @@ def list_panes(server=None):
     return panes
 
 
+def start_command(fmt):
+    """A pane's start command, from #{pane_start_command}, which quotes it."""
+    try:
+        words = shlex.split(fmt or "")
+    except ValueError:
+        return ""
+    return words[0] if len(words) == 1 else " ".join(map(shlex.quote, words))
+
+
+def is_ttop(cmd):
+    """Whether shell command cmd runs ttop (after any VAR=value words), as the
+    bar of a preset does."""
+    try:
+        words = [w for w in shlex.split(cmd or "") if not re.match(r"[A-Za-z_]\w*=", w)]
+    except ValueError:
+        return False
+    return bool(words) and os.path.basename(words[0]) == "ttop"
+
+
 def structure(panes, agents):
     """{session: {"windows": [...]}} for list_panes() output. A window keeps
     its id, index, name, size and layout string; a pane its id, directory and
-    the agent in it (agents maps a pane id to a Claude session id)."""
+    the agent in it (agents maps a pane id to a Claude session id), and, if it
+    runs ttop, its start command."""
     out = {}
     for p in panes:
         ws = out.setdefault(p["session"], {"windows": []})["windows"]
@@ -683,8 +716,11 @@ def structure(panes, agents):
             ws.append({"id": p["window_id"], "index": p["window"], "name": p["window_name"],
                        "auto": p["auto_name"] == "1", "active": p["window_active"] == "1",
                        "size": [p["width"], p["height"]], "layout": p["layout"], "panes": []})
-        ws[-1]["panes"].append({"id": p["pane"], "cwd": p["cwd"], "active": p["active"] == "1",
-                                "agent": agents.get(p["pane"])})
+        pane = {"id": p["pane"], "cwd": p["cwd"], "active": p["active"] == "1", "agent": agents.get(p["pane"])}
+        run = start_command(p.get("start"))
+        if is_ttop(run):  # the one start command a rebuild runs again: other ones can do harm twice
+            pane["run"] = run
+        ws[-1]["panes"].append(pane)
     return out
 
 
@@ -1229,12 +1265,14 @@ def body_lines(rows, width, color, live=False, sel=None, vertical=False, height=
     return lines, at
 
 
-def title(snap, name, color, width=0):
-    """name · host · time, and a note when there's no tmux server. A narrow
-    window drops the host, then the time."""
+def title(snap, name, color, width=0, hints=()):
+    """name · host · time, a note when there's no tmux server, and the first
+    of hints that fits (a short window's key hint). A narrow window drops the
+    hint, the host, then the time."""
     clock, note = time.strftime("%H:%M:%S"), [] if snap["server"] else ["no tmux server"]
-    for parts in ([name, HOST.split(".")[0], clock], [name, clock], [name], []):
-        head = " · ".join(parts + note)
+    heads = ([name, HOST.split(".")[0], clock], [name, clock], [name], [])
+    for parts in [h + note + [hint] for hint in hints for h in heads[:2]] + [h + note for h in heads]:
+        head = " · ".join(parts)
         if not width or width_of(head) <= width:
             break
     return dim(fit(head, width) if width else head, color)
@@ -1320,7 +1358,8 @@ def build_window(w, session, first=False):
     session of that name: its panes, in their directories, then its layout.
     Returns (window id, {saved pane id: pane id})."""
     panes = ordered_panes(w)
-    args = ["-P", "-F", "#{window_id}\t#{window_index}\t#{pane_id}", "-c", start_dir(panes[0])]
+    run = lambda p: [p["run"]] if p.get("run") else []  # a preset's bar runs ttop again
+    args = ["-P", "-F", "#{window_id}\t#{window_index}\t#{pane_id}", "-c", start_dir(panes[0])] + run(panes[0])
     if first:
         out = tmux("new-session", "-d", "-s", session, "-x", w["size"][0], "-y", w["size"][1], *args)
     else:
@@ -1334,7 +1373,8 @@ def build_window(w, session, first=False):
         tmux("move-window", "-s", win, "-t", "=%s:%s" % (session, w["index"]))
     made = {panes[0]["id"]: last}
     for p in panes[1:]:
-        last = (tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", last, "-c", start_dir(p)) or "").strip()
+        last = (tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", last, "-c", start_dir(p), *run(p))
+                or "").strip()
         if not last:
             break
         made[p["id"]] = last
@@ -1532,14 +1572,67 @@ def session_name(taken):
     return str(i)
 
 
-def new_session():
+BAR_COLS = 25  # preset: the width of the bar on the right of a wide window
+WIDE = 2.25    # preset: from this width/height in pixels on, a window is wide (21:9 is 2.33, 16:9 1.78)
+
+
+def window_size():
+    """The size of a window shown here: this pane's window inside tmux, else
+    the terminal's."""
+    if inside_tmux():
+        out = (tmux("display", "-p", "-t", os.environ.get("TMUX_PANE", ""), "#{window_width} #{window_height}")
+               or "").split()
+        if len(out) == 2 and all(n.isdigit() for n in out):
+            return int(out[0]), int(out[1])
+    size = shutil.get_terminal_size((80, 24))
+    return size.columns, size.lines
+
+
+def apply_preset(target):
+    """Give window target, which has one pane, the preset layout: a bar with
+    ttop -p, and the rest split into two panes side by side. A wide window
+    gets the bar on the right, BAR_COLS wide, with ttop -v; any other window
+    gets it at the bottom, 5 to 10 lines high. TLS_PRESET=right or bottom
+    picks one. Returns an error message or None."""
+    out = tmux("display", "-p", "-t", target, "#{window_panes}\t#{window_width}\t#{window_height}\t"
+               "#{pane_id}\t#{pane_current_path}")
+    f = (out or "").rstrip("\n").split("\t")
+    if len(f) != 5 or not all(n.isdigit() for n in f[:3]):
+        return "no tmux window %s" % (target or "here")
+    (panes, w, h), pane, cwd = map(int, f[:3]), f[3], f[4]
+    if panes != 1:
+        return "the window has %d panes; a preset needs a window with one" % panes
+    which = os.environ.get("TLS_PRESET", "")
+    if which not in ("right", "bottom"):  # by the shape, in pixels if tmux knows a cell's size
+        cell = (tmux("display", "-p", "#{client_cell_width} #{client_cell_height}") or "").split()
+        cw, ch = map(int, cell) if len(cell) == 2 and all(n.isdigit() and n != "0" for n in cell) else (1, 2)
+        which = "right" if w * cw >= WIDE * h * ch and w >= BAR_COLS + 2 * 80 + 2 else "bottom"
+    ttop = shlex.quote(os.path.join(os.path.dirname(SELF), "ttop"))
+    if os.environ.get("TLS_PRESET"):  # the bar's ttop makes its new sessions the same way
+        ttop = "TLS_PRESET=%s %s" % (shlex.quote(os.environ["TLS_PRESET"]), ttop)
+    bar = (["-h", "-l", str(BAR_COLS), ttop + " -v -p"] if which == "right"
+           else ["-v", "-l", str(max(5, min(10, h // 5))), ttop + " -p"])
+    if tmux("split-window", "-d", "-t", pane, "-c", cwd, *bar) is None:
+        return "no room for the preset's bar"
+    if tmux("split-window", "-d", "-h", "-t", pane, "-c", cwd) is None:
+        return "no room for the preset's second pane"
+    return None
+
+
+def new_session(preset=False):
     """Create a detached session with a free name. Like `t`, it starts in the
-    current directory. Returns (name, None) or (None, error)."""
+    current directory; with preset, like `t -p`, it gets the preset layout,
+    at the size it has when it shows here. Returns (name, error): the error
+    can come with a name, when only the preset failed."""
     taken = (tmux("list-sessions", "-F", "#{session_name}") or "").splitlines()
     name = session_name(taken)
-    if tmux("new-session", "-d", "-s", name) is None:
+    size = []
+    if preset:  # made at the size it gets here, so that switching to it resizes nothing
+        w, h = window_size()
+        size = ["-x", str(w), "-y", str(h)]
+    if tmux("new-session", "-d", "-s", name, *size) is None:
         return None, "couldn't create tmux session " + name
-    return name, None
+    return name, apply_preset("=%s:" % name) if preset else None
 
 
 def find(prefix):
@@ -1601,7 +1694,7 @@ def wrap(text, width, most=None, hang=""):
     return lines
 
 
-def ttop(vertical=False):
+def ttop(vertical=False, preset=False):
     import select
     import termios
     import tty
@@ -1638,9 +1731,15 @@ def ttop(vertical=False):
                     sel = None
             size = shutil.get_terminal_size((100, 30))
             width = size.columns - 1  # stay off the last column: no autowrap
-            text = msg if time.time() < msg_until else HINT_V if vertical else HINT
-            foot = [""] + [dim(l, True) for l in (wrap(text, width, 4) if vertical else [fit(text, width)])]
-            room = max(1, size.lines - 2 - len(foot))
+            text = msg if time.time() < msg_until else ""
+            if size.lines < 12:  # a bar, such as a preset's: no blank lines, the hint on the title line
+                head = [title(snap, "ttop", True, width, (HINT_V,) if vertical else (HINT, HINT_V))]
+                foot = [dim(l, True) for l in wrap(text, width, 2)] if text else []
+            else:
+                head = [title(snap, "ttop", True, width), ""]
+                text = text or (HINT_V if vertical else HINT)
+                foot = [""] + [dim(l, True) for l in (wrap(text, width, 4) if vertical else [fit(text, width)])]
+            room = max(1, size.lines - len(head) - len(foot))
             body, at = body_lines(rows, width, True, live=True, sel=sel, vertical=vertical, height=room)
             if sel is not None:  # scroll the selection, all its lines, into view
                 y0, y1 = at[sel]
@@ -1651,7 +1750,7 @@ def ttop(vertical=False):
                         top -= 1  # bring its section heading along
                 top = min(max(top, y1 - room + 1), y0)
             top = max(0, min(top, len(body) - room))
-            lines = ([title(snap, "ttop", True, width), ""] + body[top:top + room] + foot)[:size.lines]
+            lines = (head + body[top:top + room] + foot)[:size.lines]
             out.write("\033[H" + "\n".join(l + "\033[K\033[0m" for l in lines) + "\033[J")
             out.flush()
             if not select.select([fd], [], [], max(0, refresh_at - time.time()))[0]:
@@ -1698,10 +1797,10 @@ def ttop(vertical=False):
                     msg_until, refresh_at = time.time() + 5, 0
                     continue
                 if k == "n":
-                    name, err = new_session()
+                    name, err = new_session(preset)
                     if name:
                         sel_id = ("session", name)  # the refresh selects its row
-                        err = open_session(name, None, None, leave, enter)
+                        err = open_session(name, None, None, leave, enter) or err
                     if err:
                         msg, msg_until = err, time.time() + 5
                     refresh_at = 0
@@ -1777,13 +1876,21 @@ def main(argv):
     if cmd == "new-name":
         print(session_name((tmux("list-sessions", "-F", "#{session_name}") or "").splitlines()))
         return 0
-    if cmd == "top":  # ttop [-v | -h]: here -h is horizontal, and --help the help
-        vertical = {(): False, ("-h",): False, ("--horizontal",): False,
-                    ("-v",): True, ("--vertical",): True}.get(tuple(argv[1:]))
-        if vertical is None:
-            print(__doc__.strip())
-            return 0 if argv[1:] == ["--help"] else 2
-        return ttop(vertical) if sys.stdin.isatty() and sys.stdout.isatty() else one_shot(vertical)
+    if cmd == "top":  # ttop [-v | -h] [-p]: here -h is horizontal, and --help the help
+        flags = {"-v": ("vertical", True), "--vertical": ("vertical", True), "-h": ("vertical", False),
+                 "--horizontal": ("vertical", False), "-p": ("preset", True), "--preset": ("preset", True)}
+        opts = {"vertical": False, "preset": False}
+        for a in argv[1:]:
+            if a not in flags:
+                print(__doc__.strip())
+                return 0 if a == "--help" else 2
+            opts[flags[a][0]] = flags[a][1]
+        return ttop(**opts) if sys.stdin.isatty() and sys.stdout.isatty() else one_shot(opts["vertical"])
+    if cmd == "preset" and len(argv) <= 2:
+        err = apply_preset(argv[1] if len(argv) == 2 else os.environ.get("TMUX_PANE", ""))
+        if err:
+            print("tls preset: " + err, file=sys.stderr)
+        return 1 if err else 0
     if argv in (["-v"], ["--vertical"]):
         return one_shot(vertical=True)
     if cmd not in ("", "-1", "--horizontal"):  # -1: what plain tls did before ttop existed

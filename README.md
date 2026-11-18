@@ -39,6 +39,8 @@ tmux-agents fixes both problems.
   back in its old session, window and pane, and continues its conversation.
 - **Session control.** `n` opens a new session with a free name. Del deletes a session or an
   agent, after you confirm.
+- **Window presets.** `t -p` opens a new session that is already split for work: two panes
+  side by side, and a bar with ttop, on the right of a wide window or at the bottom.
 - **Shell helpers for bash.** `t`, `trm` and `tmv` open, kill and rename sessions. They match
   session names exactly. Plain tmux takes `-t foo` to mean `foobar` when there is no `foo`.
 - **Any agent.** Claude Code works out of the box. Other agents report their state with one
@@ -101,7 +103,7 @@ Two options are not in the default install:
 | ↑ ↓ Home End PgUp PgDn | Select a row. |
 | Enter | Open the selected session or agent, or bring back a dead agent. |
 | 1-9, then a-z without d, n, q and r | Do the same for the row with that key. A session opens at its most urgent agent. |
-| n | Open a new session in the current directory, with a free adjective-noun name. |
+| n | Open a new session in the current directory, with a free adjective-noun name. With `ttop -p`, give it the preset layout. |
 | Del or Backspace | Delete the selected session (kill-session), agent (kill-pane) or dead agent (forget it). Enter confirms. |
 | R | Bring back all dead agents. |
 | d | Forget a dead agent: the selected one, or press its key. |
@@ -147,11 +149,43 @@ ttop · myhost · 11:22:25    │ ttop · 11:22:25     │ ttop · 11:22:25
 To make the vertical layout the default, add `alias tt='ttop -v'` to `~/.bashrc`, after
 the line for `tmux-agents.bash`.
 
+### Presets
+
+`t -p NAME` (or `t --preset NAME`) makes a new session that is ready for work: two panes
+side by side, and a bar with ttop. Plain `t` does not change. The layout depends on the
+shape of the window:
+
+```
+wide window (21:9)                      other windows (16:9, 16:10)
+┌────────────┬────────────┬─────────┐   ┌─────────────┬─────────────┐
+│            │            │ ttop -v │   │             │             │
+│   shell    │   shell    │         │   │    shell    │    shell    │
+│            │            │ 25 cols │   │             │             │
+│            │            │         │   ├─────────────┴─────────────┤
+└────────────┴────────────┴─────────┘   │ ttop, 5 to 10 lines       │
+                                        └───────────────────────────┘
+```
+
+A window is wide when its width is 2.25 times its height or more, in pixels. It must also
+have room for two 80-column panes next to the bar. If tmux does not know the pixel size of
+a cell, tls takes a cell as twice as high as wide. To choose the layout yourself, set
+`TLS_PRESET=right` or `TLS_PRESET=bottom`.
+
+The bar runs `ttop -p`, so its `n` key also makes sessions in the preset layout. Start
+ttop with `-p` (`tt -p`, `tt -v -p`) to get this `n` in other places too. `tls preset`
+gives the preset layout to a window with one pane, for example a new window in a session.
+When tls rebuilds a session after a reboot, ttop starts again in its bar. In a window of
+less than 12 lines, such as the bottom bar, ttop has no blank lines, and its key hint is
+on the title line.
+
+To use the presets each time, add `alias t='t -p'` and `alias tt='ttop -p'` to
+`~/.bashrc`, after the line for `tmux-agents.bash`.
+
 ### Shell helpers
 
 | Shell helper | Action |
 | --- | --- |
-| `t [NAME]` | Go to session NAME: switch to it inside tmux, attach to it outside. If there is no session NAME, make it. With no NAME, make a session with a free name. |
+| `t [-p] [NAME]` | Go to session NAME: switch to it inside tmux, attach to it outside. If there is no session NAME, make it. With no NAME, make a session with a free name. With `-p`, a new session gets the preset layout. |
 | `trm NAME...` | Kill sessions. |
 | `tmv [OLD] NEW` | Rename session OLD, or the current session, to NEW. |
 | `tt` | Run `ttop`. `tt -v` runs `ttop -v`. |
@@ -204,6 +238,7 @@ The comments at the top of `bin/tls` give more detail.
 | `TLS_STATE_DIR` | `~/.local/state/agent-tls` | The directory for the records. |
 | `TLS_CLAUDE` | `claude` | The command that resumes a Claude Code session. |
 | `TLS_AGENT_COMMANDS` | `claude codex gemini` | Panes that run these commands show as agents before they report. |
+| `TLS_PRESET` | (by the window's shape) | `right` or `bottom`: the layout for `t -p`, `ttop -p` and `tls preset`. |
 | `TMUX_CLIENT_CACHE` | `~/.local/share/tmux-clients` | The directory for the copies of old tmux clients. |
 
 ## Files
