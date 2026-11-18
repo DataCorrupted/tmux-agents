@@ -10,7 +10,8 @@
   ttv [WINDOW]        add a bar with ttop -v, 25 columns wide and as high as
                       the window, on the right of this tmux window (or
                       WINDOW) if it is 81 columns wide or more; the panes there
-                      give up room in proportion to their widths (= tls bar)
+                      give up room in proportion to their widths. A window
+                      with a ttv bar gets the bar back at 25 columns (= tls bar)
   tls config [--defaults]
                       the settings that tls uses, and the lines of the
                       settings file that it ignores; --defaults: the settings
@@ -1926,17 +1927,25 @@ def apply_preset(target):
 def add_bar(target):
     """ttv: add a bar with ttop ([ttv] options), [ttv] width columns wide and
     as high as the window, along the right edge of window target. tmux takes
-    the room from all the panes, in proportion to their widths. Returns an
-    error message or None."""
-    out = tmux("list-panes", "-t", target, "-F",
-               "#{window_width}\t#{window_height}\t#{window_layout}\t#{pane_id}\t#{pane_start_command}")
-    panes = [line.split("\t", 4) for line in (out or "").splitlines()]
-    if not panes or len(panes[0]) != 5 or not all(n.isdigit() for n in panes[0][:2]):
+    the room from all the panes, in proportion to their widths. A window that
+    has such a bar already gets it back at [ttv] width. Returns an error
+    message or None."""
+    out = tmux("list-panes", "-t", target, "-F", "\t".join((
+        "#{window_width}", "#{window_height}", "#{window_layout}", "#{pane_id}", "#{pane_left}", "#{pane_top}",
+        "#{pane_width}", "#{pane_height}", "#{pane_start_command}")))
+    panes = [line.split("\t", 8) for line in (out or "").splitlines()]
+    if not panes or any(len(p) != 9 for p in panes) or not all(n.isdigit() for n in panes[0][:2]):
         return "no tmux window %s" % target
-    bars = [p[3] for p in panes if len(p) == 5 and is_ttop(start_command(p[4]))]
-    if bars:
-        return "pane %s of the window already runs ttop; q there closes it" % bars[0]
     (w, h), layout, cols = map(int, panes[0][:2]), panes[0][2], conf("ttv", "width")
+    for p in panes:
+        cmd = start_command(p[8])
+        if is_ttop(cmd) and not ttop_fits(cmd) and (int(p[4]) + int(p[6]), p[5], int(p[7])) == (w, "0", h):
+            if int(p[6]) != cols:  # a ttv bar: its width again (tmux keeps the new layout, as after a drag)
+                tmux("resize-pane", "-t", p[3], "-x", str(cols))
+            return None
+    bars = [p[3] for p in panes if is_ttop(start_command(p[8]))]
+    if bars:
+        return "pane %s of the window already runs ttop, but not as a ttv bar; q there closes it" % bars[0]
     if w < conf("ttv", "min-window"):
         return "the window is %d columns wide; a bar needs %d at least" % (w, conf("ttv", "min-window"))
     register_tmux_hooks()  # so that the bar keeps its width when the window changes size

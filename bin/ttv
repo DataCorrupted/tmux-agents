@@ -2,6 +2,7 @@
 # ttv [WINDOW]: add a bar with ttop -v, 25 columns wide and as high as the
 # window, on the right of this tmux window (or WINDOW), if it is 81 columns
 # wide or more. The panes there give up room in proportion to their widths.
+# In a window that has a ttv bar, it sets the bar back to 25 columns.
 # The numbers are defaults: [ttv] in ~/.config/tmux-agents/tls.conf.
 # A regular file, not a symlink: dotfile syncers often skip symlinks.
 exec "$(dirname "$(readlink -f "$0")")/tls" bar "$@"

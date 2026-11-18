@@ -606,14 +606,18 @@ $T split-window -d -v -t =tv3: "sleep 600"; $T split-window -d -h -t =tv3:.0 "sl
 G3=$(geom tv3)
 ttv =tv3:
 check "ttv in a window split top and bottom: the same" 'ttv_bar tv3 && squeezed tv3 "$G3"'
-check "ttv adds no second bar to a window with ttop in it" \
-  'out=$(ttv =tv2: 2>&1); [ $? = 1 ] && [[ $out == *"already runs ttop"* ]] && [ "$(geom tv2 | wc -l)" = 4 ]'
+$T resize-pane -t "$($T list-panes -t =tv2: -F '#{pane_id}' | tail -1)" -x 35
+check "ttv in a window with a ttv bar adds no second bar, and sets the bar back to 25 columns" \
+  'ttv =tv2: && [ "$(geom tv2 | wc -l)" = 4 ] && ttv_bar tv2'
+$T new-session -d -s tv5 -x 120 -y 30 "sleep 600"; $T split-window -d -v -l 8 -t =tv5: "'$HERE/ttop' -h"
+check "ttv adds no bar to a window with another ttop pane, such as a bar at the bottom" \
+  'out=$(ttv =tv5: 2>&1); [ $? = 1 ] && [[ $out == *"already runs ttop"* ]] && [ "$(geom tv5 | wc -l)" = 2 ]'
 $T new-session -d -s tv4 -x 80 -y 24 "sleep 600"
 check "ttv leaves alone a window of 80 columns" \
   'out=$(ttv =tv4: 2>&1); [ $? = 1 ] && [[ $out == *"80 columns wide"* ]] && [ "$(geom tv4 | wc -l)" = 1 ]'
 check "ttv with no window outside tmux says so" \
   'out=$(env -u TMUX_PANE TLS_TMUX="-L $SRV" "$HERE/ttv" 2>&1); [ $? = 1 ] && [[ $out == *"not in tmux"* ]]'
-for s in tv1 tv2 tv3 tv4; do $T kill-session -t "=$s"; done
+for s in tv1 tv2 tv3 tv4 tv5; do $T kill-session -t "=$s"; done
 
 # Resize in proportion. tmux takes the same number of columns from each pane,
 # so the ttv bar went down to 1 column. tls's window-resized hook gives the

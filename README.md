@@ -220,8 +220,9 @@ border take the other 26 columns. The cursor stays in your pane.
 equal parts, because tmux does it that way: panes of 50 and 50 columns come back as 50 and
 50, but panes of 30 and 70 columns come back as 35 and 65.
 
-ttv does nothing in a window of 80 columns or less. It also does nothing in a window that
-already has a bar with ttop, from ttv or from a preset. `ttv WINDOW` adds the bar to a
+ttv does nothing in a window of 80 columns or less. In a window that already has a ttv bar,
+ttv sets the bar back to 25 columns, for example after a drag. It does nothing in a window
+with a different ttop pane, such as the bar of a preset. `ttv WINDOW` adds the bar to a
 different window, for example `ttv =main:1`. ttv works in all shells.
 
 ### Window resize
