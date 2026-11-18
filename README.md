@@ -41,7 +41,8 @@ tmux-agents fixes both problems.
 - **Session control.** `n` opens a new session with a free name. Del deletes a session or an
   agent, after you confirm.
 - **Window presets.** `t -p` opens a new session that is already split for work: two panes
-  side by side, and a bar with ttop, on the right of a wide window or at the bottom.
+  side by side, and a bar with ttop, on the right of a wide window or at the bottom. `ttv`
+  adds a ttop bar on the right of the window you are in, whatever its panes are.
 - **Shell helpers for bash.** `t`, `trm` and `tmv` open, kill and rename sessions. They match
   session names exactly. Plain tmux takes `-t foo` to mean `foobar` when there is no `foo`.
   `t` and `tmv` refuse names that tmux can misread, such as `-p` or `foo.bar`.
@@ -77,7 +78,8 @@ cd ~/tmux-agents
 echo '. ~/.local/bin/tmux-agents.bash' >> ~/.bashrc
 ```
 
-The installer copies `tls`, `ttop`, `tls-test` and `tmux-agents.bash` into `~/.local/bin`.
+The installer copies `tls`, `ttop`, `ttv`, `tls-test` and `tmux-agents.bash` into
+`~/.local/bin`.
 Use `--bin DIR` for a different directory. Then the installer runs `tls setup`:
 
 - Setup adds the Claude Code hooks to `~/.claude/settings.json`, with a backup.
@@ -201,6 +203,22 @@ on the title line.
 To use the presets each time, add `alias t='t -p'` and `alias tt='ttop -p'` to
 `~/.bashrc`, after the line for `tmux-agents.bash`.
 
+### A bar in any window (ttv)
+
+`ttv` adds a bar with `ttop -v` to the tmux window that you are in. The bar is 25 columns
+wide and as high as the window, on the right. The window can have any panes. Each pane
+keeps its height, and gives up width in proportion to its width. For example, in a window
+of 101 columns, two panes of 50 columns become two panes of 37 columns. The bar and its
+border take the other 26 columns. The cursor stays in your pane.
+
+`q` in the bar quits ttop and closes the bar. Then the panes get the 26 columns back in
+equal parts, because tmux does it that way: panes of 50 and 50 columns come back as 50 and
+50, but panes of 30 and 70 columns come back as 35 and 65.
+
+ttv does nothing in a window of 80 columns or less. It also does nothing in a window that
+already has a bar with ttop, from ttv or from a preset. `ttv WINDOW` adds the bar to a
+different window, for example `ttv =main:1`. ttv works in all shells.
+
 ### Shell helpers
 
 | Shell helper | Action |
@@ -272,6 +290,7 @@ The comments at the top of `bin/tls` give more detail.
 | --- | --- |
 | `bin/tls` | The dashboard and the agent interface, in one Python file. |
 | `bin/ttop` | A short script that runs `tls top`. |
+| `bin/ttv` | A short script that runs `tls bar`. |
 | `bin/tls-test` | The self-test. |
 | `shell/tmux-agents.bash` | The bash helpers. |
 | `config/tmux.conf` | The tmux config of the author (optional). |
@@ -282,7 +301,7 @@ The comments at the top of `bin/tls` give more detail.
 ## Tests
 
 ```sh
-bin/tls-test     # about 130 checks on throwaway tmux servers
+bin/tls-test     # about 140 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux

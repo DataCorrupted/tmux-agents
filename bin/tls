@@ -7,6 +7,10 @@
                       -v vertical, -h horizontal, neither: by the window's
                       shape; -p: n makes its new sessions in the preset layout;
                       -f: ttop fits its tmux pane to the list
+  ttv [WINDOW]        add a bar with ttop -v, 25 columns wide and as high as
+                      the window, on the right of this tmux window (or
+                      WINDOW) if it is over 80 columns wide; the panes there
+                      give up room in proportion to their widths (= tls bar)
   tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
                       splits, and each dead agent's resume command in its pane
   tls forget ID       drop a dead agent from the list
@@ -122,8 +126,8 @@ this file.
 # are marked deleted first, so the dying Claude's last hooks can't list them as
 # dead; a later `claude --resume` of one clears the mark.
 #
-# Files: tls, ttop (runs `tls top`) and tls-test (self-test on throwaway tmux
-# servers) in one directory, plus tmux-agent-classify if you have one. Install
+# Files: tls, ttop (runs `tls top`), ttv (runs `tls bar`) and tls-test
+# (self-test on throwaway tmux servers) in one directory, plus tmux-agent-classify if you have one. Install
 # them as regular files, not symlinks (install.sh does): dotfile syncers often
 # skip symlinks. Hook errors go to errors.log in the state directory; hooks
 # never print.
@@ -1609,8 +1613,9 @@ def session_name(taken):
     return str(i)
 
 
-BAR_COLS = 25  # preset: the width of the bar on the right of a wide window
+BAR_COLS = 25  # the width of a bar on the right: a wide window's preset bar, and ttv's
 WIDE = 2.25    # preset: from this width/height in pixels on, a window is wide (21:9 is 2.33, 16:9 1.78)
+BAR_OVER = 80  # ttv adds a bar only to a window wider than this
 
 
 def window_size():
@@ -1642,8 +1647,13 @@ def nested_right(w, h, a, b, bar):
     body = "%dx%d,0,0{%dx%d,0,0{%dx%d,0,0,%s,%dx%d,%d,0,%s},%dx%d,%d,0,%s}" % (
         w, h, inner, h, inner // 2, h, a.lstrip("%"), inner - 1 - inner // 2, h, inner // 2 + 1,
         b.lstrip("%"), BAR_COLS, h, inner + 1, bar.lstrip("%"))
+    return tmux_layout(body)
+
+
+def tmux_layout(body):
+    """A layout string for select-layout: body with tmux's checksum in front."""
     csum = 0
-    for ch in body:  # tmux's layout checksum
+    for ch in body:
         csum = ((csum >> 1) + ((csum & 1) << 15) + ord(ch)) & 0xFFFF
     return "%04x,%s" % (csum, body)
 
@@ -1680,6 +1690,40 @@ def apply_preset(target):
         return "no room for the preset's second pane"
     if which == "right":  # at the bottom, the two panes already share a cell
         tmux("select-layout", "-t", pane, nested_right(w, h, pane, second.strip(), side.strip()))
+    return None
+
+
+def add_bar(target):
+    """ttv: add a bar with ttop -v, BAR_COLS wide and as high as the window,
+    along the right edge of window target. tmux takes the room from all the
+    panes, in proportion to their widths. Returns an error message or None."""
+    out = tmux("list-panes", "-t", target, "-F",
+               "#{window_width}\t#{window_height}\t#{window_layout}\t#{pane_id}\t#{pane_start_command}")
+    panes = [line.split("\t", 4) for line in (out or "").splitlines()]
+    if not panes or len(panes[0]) != 5 or not all(n.isdigit() for n in panes[0][:2]):
+        return "no tmux window %s" % target
+    bars = [p[3] for p in panes if len(p) == 5 and is_ttop(start_command(p[4]))]
+    if bars:
+        return "pane %s of the window already runs ttop; q there closes it" % bars[0]
+    w, h, layout = int(panes[0][0]), int(panes[0][1]), panes[0][2]
+    if w <= BAR_OVER:
+        return "the window is %d columns wide; a bar needs more than %d" % (w, BAR_OVER)
+    ttop = shlex.quote(os.path.join(os.path.dirname(SELF), "ttop"))
+    bar = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-f", "-h", "-l", str(BAR_COLS),
+               "-t", target, ttop + " -v")
+    if bar is None:
+        return "no room for the bar"
+    # In a window split side by side, tmux puts the bar in the same row as the
+    # panes. Then it gives the bar's room, when the bar closes, and each change
+    # of the bar's width to the pane next to the bar alone. In a cell of their
+    # own, all the panes share them.
+    if re.match(r"[0-9a-f]{4},\d+x\d+,0,0\{", layout):
+        head = "%dx%d,0,0{" % (w, h)
+        side = "%dx%d,%d,0,%s}" % (BAR_COLS, h, w - BAR_COLS, bar.strip().lstrip("%"))
+        now = (tmux("display", "-p", "-t", target, "#{window_layout}") or "").strip()[5:]
+        if now.startswith(head) and now.endswith("," + side):
+            tmux("select-layout", "-t", target, tmux_layout("%s%dx%d,0,0{%s},%s" % (
+                head, w - BAR_COLS - 1, h, now[len(head):-len(side) - 1], side)))
     return None
 
 
@@ -2009,6 +2053,15 @@ def main(argv):
         if sys.stdin.isatty() and sys.stdout.isatty():
             return ttop(**opts)
         return one_shot(bool(opts["vertical"]))
+    if cmd == "bar" and len(argv) <= 2:  # ttv [WINDOW]
+        target = argv[1] if len(argv) == 2 else os.environ.get("TMUX_PANE", "")
+        if target.startswith("-"):
+            print(__doc__.strip())
+            return 0 if target in ("-h", "--help") else 2
+        err = add_bar(target) if target else "not in tmux: run ttv in a tmux pane, or name a window"
+        if err:
+            print("ttv: " + err, file=sys.stderr)
+        return 1 if err else 0
     if cmd == "preset" and len(argv) <= 2:
         err = apply_preset(argv[1] if len(argv) == 2 else os.environ.get("TMUX_PANE", ""))
         if err:

@@ -1,0 +1,6 @@
+#!/bin/sh
+# ttv [WINDOW]: add a bar with ttop -v, 25 columns wide and as high as the
+# window, on the right of this tmux window (or WINDOW), if it is over 80
+# columns wide. The panes there give up room in proportion to their widths.
+# A regular file, not a symlink: dotfile syncers often skip symlinks.
+exec "$(dirname "$(readlink -f "$0")")/tls" bar "$@"

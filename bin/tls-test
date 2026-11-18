@@ -567,6 +567,52 @@ check "it grows by a line for each new session" 'retry size_is "$FH" "200x$(want
 $T kill-session -t =fit1; $T kill-session -t =fit2
 check "and shrinks when they go" 'retry size_is "$FH" "200x$(want_h)"'
 $T kill-session -t =fith
+
+# ttv: a bar with ttop -v, 25 columns wide and as high as the window, on the
+# right of any window over 80 columns. tmux takes the room from all the panes,
+# in proportion to their widths. In a cell of their own, the panes also share
+# the room again when the bar closes (in equal parts: tmux does that).
+ttv() { TLS_TMUX="-L $SRV" "$HERE/ttv" "$@"; }   # always with a window: TMUX_PANE can be your own pane
+geom() { $T list-panes -t "=$1:" -F '#{pane_id} #{pane_width} #{pane_height}'; }
+same_geom() { [ "$(geom "$1")" = "$2" ]; }
+ttv_bar() {  # ttv_bar SESSION: its last pane is a bar along the right edge, 25 columns, as high as the window, with ttop -v
+  $T list-panes -t "=$1:" -F '#{pane_left} #{pane_top} #{pane_width} #{pane_height} #{window_width} #{window_height} #{pane_start_command}' |
+    awk 'END { exit !($1 + $3 == $5 && $2 == 0 && $3 == 25 && $4 == $6 && /ttop.? -v"?$/) }'
+}
+squeezed() {  # squeezed SESSION BEFORE: each pane of BEFORE (geom) kept its height and lost width in proportion, to the column
+  geom "$1" | awk -v W="$($T display -p -t "=$1:" '#{window_width}')" -v before="$2" '
+    BEGIN { n = split(before, b, "\n"); for (i = 1; i <= n; i++) { split(b[i], f, " "); w[f[1]] = f[2]; h[f[1]] = f[3] } }
+    $1 in w { d = $2 - w[$1] * (W - 26) / W; if (d * d >= 1 || $3 != h[$1]) bad = 1; seen++ }
+    END { exit !(seen == n && !bad) }'
+}
+$T new-session -d -s tv1 -x 101 -y 30 "sleep 600"; $T split-window -d -h -t =tv1: "sleep 600"
+G1=$(geom tv1)
+ttv =tv1:
+check "ttv: a bar of 25 columns with ttop -v on the right, as high as the window; two panes give up room in proportion" \
+  'ttv_bar tv1 && squeezed tv1 "$G1" && nested tv1'
+TV=$($T list-panes -t =tv1: -F '#{pane_id}' | tail -1)
+check "the bar's ttop shows the list vertically" 'retry shows_in "$TV" "^↑↓ enter n del R q$"'
+$T send-keys -t "$TV" q
+check "q in the bar closes it, and the two panes share its room again" 'retry same_geom tv1 "$G1"'
+$T new-session -d -s tv2 -x 121 -y 40 "sleep 600"
+$T split-window -d -h -l 80 -t =tv2: "sleep 600"; $T split-window -d -v -t =tv2:.1 "sleep 600"; $T select-pane -t =tv2:.2
+G2=$(geom tv2); C2=$($T display -p -t =tv2:.2 '#{pane_id}')
+TMUX_PANE="$C2" TLS_TMUX="-L $SRV" "$HERE/ttv"
+check "ttv in any layout (here a pane, and two above each other): heights stay, widths shrink in proportion, the cursor stays" \
+  'ttv_bar tv2 && squeezed tv2 "$G2" && [ "$($T display -p -t =tv2: "#{pane_id}")" = "$C2" ]'
+$T new-session -d -s tv3 -x 121 -y 40 "sleep 600"
+$T split-window -d -v -t =tv3: "sleep 600"; $T split-window -d -h -t =tv3:.0 "sleep 600"
+G3=$(geom tv3)
+ttv =tv3:
+check "ttv in a window split top and bottom: the same" 'ttv_bar tv3 && squeezed tv3 "$G3"'
+check "ttv adds no second bar to a window with ttop in it" \
+  'out=$(ttv =tv2: 2>&1); [ $? = 1 ] && [[ $out == *"already runs ttop"* ]] && [ "$(geom tv2 | wc -l)" = 4 ]'
+$T new-session -d -s tv4 -x 80 -y 24 "sleep 600"
+check "ttv leaves alone a window of 80 columns" \
+  'out=$(ttv =tv4: 2>&1); [ $? = 1 ] && [[ $out == *"80 columns wide"* ]] && [ "$(geom tv4 | wc -l)" = 1 ]'
+check "ttv with no window outside tmux says so" \
+  'out=$(env -u TMUX_PANE TLS_TMUX="-L $SRV" "$HERE/ttv" 2>&1); [ $? = 1 ] && [[ $out == *"not in tmux"* ]]'
+for s in tv1 tv2 tv3 tv4; do $T kill-session -t "=$s"; done
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,

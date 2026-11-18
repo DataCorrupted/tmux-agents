@@ -60,7 +60,7 @@ later steps in the clone.
 
 ## 3. Choose the bin directory
 
-The installer copies four files into one directory. The default is `~/.local/bin`. This
+The installer copies five files into one directory. The default is `~/.local/bin`. This
 directory must be on `PATH`:
 
 ```sh
@@ -101,7 +101,7 @@ Without setup, tmux gets its hooks when the first agent reports from a tmux pane
 
 Check the output:
 
-- The first line is `installed tls, ttop, tls-test and tmux-agents.bash in <dir>`.
+- The first line is `installed tls, ttop, ttv, tls-test and tmux-agents.bash in <dir>`.
 - If `~/.bashrc` does not load the helpers yet, the installer prints the lines for step 5.
 - Setup prints one line for each change, and then the list of tmux sessions.
 - If the output has a `note` line, the bin directory is not on `PATH`, or a different
@@ -110,7 +110,7 @@ Check the output:
 ## 5. Add the shell helpers
 
 The helpers `t`, `trm`, `tmv` and `tt` need bash. For a different shell, skip this step:
-`tls` and `ttop` work in all shells.
+`tls`, `ttop` and `ttv` work in all shells.
 
 Ask the user, and then add this line to `~/.bashrc`. Use the directory from step 4:
 
@@ -132,7 +132,7 @@ Do not check with `bash -i`. If your shell has a terminal, `bash -i` can run
 
 ## 6. Test
 
-Run the installed self-test. It takes about 15 seconds.
+Run the installed self-test. It takes about 30 seconds.
 
 ```sh
 ~/.local/bin/tls-test
@@ -176,7 +176,7 @@ code, so tell the user to quit it with `q` and start it again.
 
 ## Uninstall
 
-1. Delete `tls`, `ttop`, `tls-test` and `tmux-agents.bash` from the bin directory. If the
+1. Delete `tls`, `ttop`, `ttv`, `tls-test` and `tmux-agents.bash` from the bin directory. If the
    user put a `tmux-agent-classify` there, ask before you delete it.
 2. In `~/.claude/settings.json`, delete each hook whose command ends in `tls hook`. Do not
    restore the backup instead, because it does not have the later changes.

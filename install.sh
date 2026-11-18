@@ -22,11 +22,11 @@ mkdir -p "$bin"
 put() {  # put SRC MODE NAME: copy, then rename into place, so a running hook never sees half a file
     install -m "$2" "$1" "$bin/.$3.tmp" && mv -f "$bin/.$3.tmp" "$bin/$3"
 }
-for f in tls ttop tls-test; do
+for f in tls ttop ttv tls-test; do
     put "$src/bin/$f" 755 "$f"
 done
 put "$src/shell/tmux-agents.bash" 644 tmux-agents.bash
-echo "installed tls, ttop, tls-test and tmux-agents.bash in $bin"
+echo "installed tls, ttop, ttv, tls-test and tmux-agents.bash in $bin"
 
 if [ "$conf" = 1 ]; then
     if [ -e ~/.tmux.conf ] && ! cmp -s "$src/config/tmux.conf" ~/.tmux.conf; then
