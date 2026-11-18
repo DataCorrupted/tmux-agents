@@ -11,7 +11,11 @@
                       the window, on the right of this tmux window (or
                       WINDOW) if it is 81 columns wide or more; the panes there
                       give up room in proportion to their widths. A window
-                      with a ttv bar gets the bar back at 25 columns (= tls bar)
+                      with a ttv bar gets the bar back at 25 columns, and a
+                      bar at the bottom moves to the right (= tls bar right)
+  tth [WINDOW]        the same with ttop -h, 10 lines high and as wide as the
+                      window, at its bottom, if it is 30 lines high or more:
+                      for a screen that is taller than wide (= tls bar bottom)
   tls config [--defaults]
                       the settings that tls uses, and the lines of the
                       settings file that it ignores; --defaults: the settings
@@ -58,8 +62,8 @@ window at most. Horizontal: as high as the list and its title, 2 lines to a
 third of the window. The preset bars use it.
 
 Resize: when a window changes size, its panes keep their proportions, and a
-ttop bar keeps its width; a ttv bar changes too, but stays 25 to 30 columns
-wide. Back at the old size, the old layout comes back. tmux alone takes the
+ttop bar keeps its size; a ttv bar changes too, but stays 25 to 30 columns
+wide, and a tth bar 10 to 12 lines high. Back at the old size, the old layout comes back. tmux alone takes the
 same number of columns from each pane, so narrow panes go down to 1 column.
 To stop it: proportional = off in the [resize] section of the settings file.
 
@@ -157,7 +161,7 @@ this file.
 # are marked deleted first, so the dying Claude's last hooks can't list them as
 # dead; a later `claude --resume` of one clears the mark.
 #
-# Files: tls, ttop (runs `tls top`), ttv (runs `tls bar`) and tls-test
+# Files: tls, ttop (runs `tls top`), ttv and tth (`tls bar`) and tls-test
 # (self-test on throwaway tmux servers) in one directory, plus tmux-agent-classify if you have one. Install
 # them as regular files, not symlinks (install.sh does): dotfile syncers often
 # skip symlinks. Hook errors go to errors.log in the state directory; hooks
@@ -215,6 +219,13 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
     ("ttv", "min-window", 81, int, "ttv adds a bar only to a window at least this many columns wide."),
     ("ttv", "options", "-v", "ttop",
      "The ttop options of the bar. With -f, ttop fits the bar to the list, and min-width and max-width do not apply."),
+    ("tth", "height", 10, int, "The height of the bar that tth adds, in lines."),
+    ("tth", "min-height", 10, int,
+     "When the window changes size, the bar changes in proportion, but it keeps this many lines at least."),
+    ("tth", "max-height", 12, int, "When the window changes size, the bar gets this many lines at most."),
+    ("tth", "min-window", 30, int, "tth adds a bar only to a window at least this many lines high."),
+    ("tth", "options", "-h", "ttop",
+     "The ttop options of the bar. With -f, ttop fits the bar to the list, and min-height and max-height do not apply."),
     ("preset", "layout", "auto", ("auto", "right", "bottom"),
      "Where t -p, ttop -p and tls preset put the bar. auto: on the right of a wide window, else at the bottom."),
     ("preset", "wide", 2.25, float,
@@ -226,7 +237,7 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
     ("preset", "bottom-max-lines", 10, int, "A bar at the bottom starts with this many lines at most."),
     ("resize", "proportional", "on", ("on", "off"),
      "on: when a window changes size, its panes keep their proportions, and a ttop bar keeps its size "
-     "(a ttv bar: see [ttv]). off: tmux takes the same number of columns from each pane."),
+     "(ttv and tth bars: see [ttv] and [tth]). off: tmux takes the same number of columns from each pane."),
     ("agents", "claude", "claude", str, "The command that resumes a Claude Code session, as: claude --resume ID."),
     ("agents", "commands", "claude codex gemini", "words",
      "A pane that runs one of these commands shows as an agent before the agent reports."),
@@ -235,6 +246,7 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
 SETTING_ENV = {"TLS_PRESET": ("preset", "layout"), "TLS_CLAUDE": ("agents", "claude"),
                "TLS_AGENT_COMMANDS": ("agents", "commands")}
 SETTING_PAIRS = ((("ttop", "fit-min-width"), ("ttop", "fit-max-width")), (("ttv", "min-width"), ("ttv", "max-width")),
+                 (("tth", "min-height"), ("tth", "max-height")),
                  (("preset", "bottom-min-lines"), ("preset", "bottom-max-lines")))
 _CONF = None  # (values, sources, problems), when a setting is first needed
 
@@ -1924,47 +1936,59 @@ def apply_preset(target):
     return None
 
 
-def add_bar(target):
-    """ttv: add a bar with ttop ([ttv] options), [ttv] width columns wide and
-    as high as the window, along the right edge of window target. tmux takes
-    the room from all the panes, in proportion to their widths. A window that
-    has such a bar already gets it back at [ttv] width. Returns an error
-    message or None."""
+def add_bar(target, side="right"):
+    """ttv (side right) and tth (side bottom): add a bar with ttop, along the
+    right edge of window target and [ttv] width columns wide, or along its
+    bottom edge and [tth] height lines high. tmux takes the room from all the
+    panes, in proportion to their sizes. A window that has such a bar already
+    gets it back at its size; a bar on the other side moves here. Returns an
+    error message or None."""
+    right = side == "right"
+    sec, size = ("ttv", conf("ttv", "width")) if right else ("tth", conf("tth", "height"))
     out = tmux("list-panes", "-t", target, "-F", "\t".join((
-        "#{window_width}", "#{window_height}", "#{window_layout}", "#{pane_id}", "#{pane_left}", "#{pane_top}",
-        "#{pane_width}", "#{pane_height}", "#{pane_start_command}")))
-    panes = [line.split("\t", 8) for line in (out or "").splitlines()]
-    if not panes or any(len(p) != 9 for p in panes) or not all(n.isdigit() for n in panes[0][:2]):
+        "#{window_width}", "#{window_height}", "#{pane_id}", "#{pane_left}", "#{pane_top}", "#{pane_width}",
+        "#{pane_height}", "#{pane_start_command}")))
+    panes = [line.split("\t", 7) for line in (out or "").splitlines()]
+    if not panes or any(len(p) != 8 for p in panes) or not all(n.isdigit() for n in panes[0][:2]):
         return "no tmux window %s" % target
-    (w, h), layout, cols = map(int, panes[0][:2]), panes[0][2], conf("ttv", "width")
+    w, h = map(int, panes[0][:2])
+    bars = {}  # where: (pane, has -f, its width or height now), for the panes that run ttop
     for p in panes:
-        cmd = start_command(p[8])
-        if is_ttop(cmd) and not ttop_fits(cmd) and (int(p[4]) + int(p[6]), p[5], int(p[7])) == (w, "0", h):
-            if int(p[6]) != cols:  # a ttv bar: its width again (tmux keeps the new layout, as after a drag)
-                tmux("resize-pane", "-t", p[3], "-x", str(cols))
-            return None
-    bars = [p[3] for p in panes if is_ttop(start_command(p[8]))]
-    if bars:
-        return "pane %s of the window already runs ttop, but not as a ttv bar; q there closes it" % bars[0]
-    if w < conf("ttv", "min-window"):
-        return "the window is %d columns wide; a bar needs %d at least" % (w, conf("ttv", "min-window"))
-    register_tmux_hooks()  # so that the bar keeps its width when the window changes size
+        cmd = start_command(p[7])
+        if is_ttop(cmd):
+            left, top, pw, ph = map(int, p[3:7])
+            where = ("right" if (left + pw, top, ph) == (w, 0, h) and pw < w else
+                     "bottom" if (top + ph, left, pw) == (h, 0, w) and ph < h else "other")
+            bars.setdefault(where, (p[2], ttop_fits(cmd), pw if right else ph))
+    if "other" in bars:
+        return "pane %s of the window already runs ttop, but not as a bar; q there closes it" % bars["other"][0]
+    if side in bars:  # its size again (tmux keeps the new layout, as after a drag); a bar with -f fits itself
+        pane, fits, now = bars[side]
+        if not fits and now != size:
+            tmux("resize-pane", "-t", pane, "-x" if right else "-y", str(size))
+        return None
+    if (w if right else h) < conf(sec, "min-window"):
+        return "the window is %d %s; a bar needs %d at least" % (
+            w if right else h, "columns wide" if right else "lines high", conf(sec, "min-window"))
+    for pane, _, _ in bars.values():  # a bar on the other side: it moves here
+        tmux("kill-pane", "-t", pane)
+    register_tmux_hooks()  # so that the bar keeps its size when the window changes size
     ttop = shlex.quote(os.path.join(os.path.dirname(SELF), "ttop"))
-    bar = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-f", "-h", "-l", str(cols),
-               "-t", target, " ".join((ttop,) + conf("ttv", "options")))
+    bar = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-f", "-h" if right else "-v", "-l", str(size),
+               "-t", target, " ".join((ttop,) + conf(sec, "options")))
     if bar is None:
         return "no room for the bar"
-    # In a window split side by side, tmux puts the bar in the same row as the
-    # panes. Then it gives the bar's room, when the bar closes, and each change
-    # of the bar's width to the pane next to the bar alone. In a cell of their
-    # own, all the panes share them.
-    if re.match(r"[0-9a-f]{4},\d+x\d+,0,0\{", layout):
-        head = "%dx%d,0,0{" % (w, h)
-        side = "%dx%d,%d,0,%s}" % (cols, h, w - cols, bar.strip().lstrip("%"))
-        now = (tmux("display", "-p", "-t", target, "#{window_layout}") or "").strip()[5:]
-        if now.startswith(head) and now.endswith("," + side):
-            tmux("select-layout", "-t", target, tmux_layout("%s%dx%d,0,0{%s},%s" % (
-                head, w - cols - 1, h, now[len(head):-len(side) - 1], side)))
+    # In a window split the same way as the bar (side by side, for a bar on
+    # the right), tmux puts the bar in the same row as the panes. Then it gives
+    # the bar's room, when the bar closes, and each change of the bar's size to
+    # the pane next to the bar alone. In a cell of their own, the panes share them.
+    cur = parse_layout((tmux("display", "-p", "-t", target, "#{window_layout}") or "").strip())
+    if (cur and cur.get("kind") == ("{" if right else "[") and len(cur["cells"]) > 2
+            and cur["cells"][-1].get("pane") == int(bar.strip().lstrip("%"))):
+        edge = cur["cells"][-1]
+        inner = dict(x=0, y=0, kind=cur["kind"], cells=cur["cells"][:-1],
+                     w=cur["w"] - edge["w"] - 1 if right else cur["w"], h=cur["h"] if right else cur["h"] - edge["h"] - 1)
+        tmux("select-layout", "-t", target, dump_layout(dict(cur, cells=[inner, edge])))
     return None
 
 
@@ -2058,18 +2082,19 @@ def scale_layout(c, w, h, bars, x=0, y=0):
     """Layout tree c resized to w x h at x, y: the cells of each split share
     its room in proportion to their old sizes. A ttop bar (bars: pane number
     to whether it has -f) keeps its size along its split while the other cells
-    have room, but a bar without -f in a row, such as ttv's, changes in
-    proportion too, within [ttv] min-width and max-width. None if the panes
-    do not fit."""
+    have room, but a bar without -f, such as ttv's or tth's, changes in
+    proportion too, within [ttv] min-width and max-width in a row, or [tth]
+    min-height and max-height in a column. None if the panes do not fit."""
     out = dict(c, w=w, h=h, x=x, y=y)
     if "pane" in c:
         return out
     wide, kids = c["kind"] == "{", c["cells"]
     room = (w if wide else h) - (len(kids) - 1)
     ratio = room / ((c["w"] if wide else c["h"]) - (len(kids) - 1))
-    low, high = conf("ttv", "min-width"), conf("ttv", "max-width")
-    keep = [None if k.get("pane") not in bars else k["h"] if not wide else k["w"] if bars[k["pane"]]
-            else max(low, min(high, int(k["w"] * ratio + 0.5))) for k in kids]
+    dim, (low, high) = ("w", "h")[not wide], ((conf("ttv", "min-width"), conf("ttv", "max-width")) if wide
+                                              else (conf("tth", "min-height"), conf("tth", "max-height")))
+    keep = [None if k.get("pane") not in bars else k[dim] if bars[k["pane"]]
+            else max(low, min(high, int(k[dim] * ratio + 0.5))) for k in kids]
     mins = [min_size(k, wide) for k in kids]
     flex = [i for i, n in enumerate(keep) if n is None]
     if not flex or sum(n for n in keep if n) + sum(mins[i] for i in flex) > room:
@@ -2455,14 +2480,15 @@ def main(argv):
     if cmd == "config" and argv[1:] in ([], ["--defaults"]):
         sys.stdout.write(config_text(defaults=argv[1:] == ["--defaults"]))
         return 0
-    if cmd == "bar" and len(argv) <= 2:  # ttv [WINDOW]
-        target = argv[1] if len(argv) == 2 else os.environ.get("TMUX_PANE", "")
+    if cmd == "bar" and len(argv) in (2, 3) and argv[1] in ("right", "bottom"):  # ttv, tth [WINDOW]
+        name = "ttv" if argv[1] == "right" else "tth"
+        target = argv[2] if len(argv) == 3 else os.environ.get("TMUX_PANE", "")
         if target.startswith("-"):
             print(__doc__.strip())
             return 0 if target in ("-h", "--help") else 2
-        err = add_bar(target) if target else "not in tmux: run ttv in a tmux pane, or name a window"
+        err = add_bar(target, argv[1]) if target else "not in tmux: run %s in a tmux pane, or name a window" % name
         if err:
-            print("ttv: " + err, file=sys.stderr)
+            print("%s: %s" % (name, err), file=sys.stderr)
         return 1 if err else 0
     if cmd == "preset" and len(argv) <= 2:
         err = apply_preset(argv[1] if len(argv) == 2 else os.environ.get("TMUX_PANE", ""))

@@ -609,15 +609,63 @@ check "ttv in a window split top and bottom: the same" 'ttv_bar tv3 && squeezed 
 $T resize-pane -t "$($T list-panes -t =tv2: -F '#{pane_id}' | tail -1)" -x 35
 check "ttv in a window with a ttv bar adds no second bar, and sets the bar back to 25 columns" \
   'ttv =tv2: && [ "$(geom tv2 | wc -l)" = 4 ] && ttv_bar tv2'
-$T new-session -d -s tv5 -x 120 -y 30 "sleep 600"; $T split-window -d -v -l 8 -t =tv5: "'$HERE/ttop' -h"
-check "ttv adds no bar to a window with another ttop pane, such as a bar at the bottom" \
-  'out=$(ttv =tv5: 2>&1); [ $? = 1 ] && [[ $out == *"already runs ttop"* ]] && [ "$(geom tv5 | wc -l)" = 2 ]'
+$T new-session -d -s tv5 -x 120 -y 30 "sleep 600"; $T split-window -d -h -t =tv5: "sleep 600"
+$T split-window -d -v -l 8 -t =tv5:.1 "'$HERE/ttop' -h"   # in a corner: not a bar
+check "ttv adds no bar to a window with a ttop pane that is not a bar" \
+  'out=$(ttv =tv5: 2>&1); [ $? = 1 ] && [[ $out == *"already runs ttop, but not as a bar"* ]] && [ "$(geom tv5 | wc -l)" = 3 ]'
 $T new-session -d -s tv4 -x 80 -y 24 "sleep 600"
 check "ttv leaves alone a window of 80 columns" \
   'out=$(ttv =tv4: 2>&1); [ $? = 1 ] && [[ $out == *"80 columns wide"* ]] && [ "$(geom tv4 | wc -l)" = 1 ]'
 check "ttv with no window outside tmux says so" \
   'out=$(env -u TMUX_PANE TLS_TMUX="-L $SRV" "$HERE/ttv" 2>&1); [ $? = 1 ] && [[ $out == *"not in tmux"* ]]'
 for s in tv1 tv2 tv3 tv4 tv5; do $T kill-session -t "=$s"; done
+
+# tth: the same along the bottom edge, with ttop -h, 10 lines high: for a
+# screen that is taller than wide. A bar on the other side moves.
+tth() { TLS_TMUX="-L $SRV" "$HERE/tth" "$@"; }
+tth_bar() {  # tth_bar SESSION: its last pane is a bar along the bottom edge, 10 lines, as wide as the window, with ttop -h
+  $T list-panes -t "=$1:" -F '#{pane_left} #{pane_top} #{pane_width} #{pane_height} #{window_width} #{window_height} #{pane_start_command}' |
+    awk 'END { exit !($2 + $4 == $6 && $1 == 0 && $4 == 10 && $3 == $5 && /ttop.? -h"?$/) }'
+}
+squeezed_v() {  # squeezed_v SESSION BEFORE: each pane of BEFORE (geom) kept its width and lost height in proportion, to the line
+  geom "$1" | awk -v H="$($T display -p -t "=$1:" '#{window_height}')" -v before="$2" '
+    BEGIN { n = split(before, b, "\n"); for (i = 1; i <= n; i++) { split(b[i], f, " "); w[f[1]] = f[2]; h[f[1]] = f[3] } }
+    $1 in w { d = $3 - h[$1] * (H - 11) / H; if (d * d >= 1 || $2 != w[$1]) bad = 1; seen++ }
+    END { exit !(seen == n && !bad) }'
+}
+nested_v() { $T display -p -t "=$1:" '#{window_layout}' | grep -qE '^[0-9a-f]{4},[0-9]+x[0-9]+,0,0\[[0-9]+x[0-9]+,0,0\['; }
+ttops_in() { $T list-panes -t "=$1:" -F '#{pane_start_command}' | grep -c ttop; }
+$T new-session -d -s th1 -x 120 -y 61 "sleep 600"; $T split-window -d -v -t =th1: "sleep 600"
+G=$(geom th1)
+tth =th1:
+check "tth: a bar of 10 lines with ttop -h at the bottom, as wide as the window; the panes give up height in proportion" \
+  'tth_bar th1 && squeezed_v th1 "$G" && nested_v th1'
+$T resize-pane -t "$($T list-panes -t =th1: -F '#{pane_id}' | tail -1)" -y 15
+check "tth in a window with a tth bar sets it back to 10 lines" 'tth =th1: && tth_bar th1 && [ "$(geom th1 | wc -l)" = 3 ]'
+$T new-session -d -s th2 -x 120 -y 40 "sleep 600"; $T split-window -d -h -t =th2: "sleep 600"
+tth =th2:
+check "tth in a window split side by side: the panes keep their widths, and the bar spans them" \
+  'tth_bar th2 && [ "$(geom th2 | awk "NR < 3 { print \$2 \"x\" \$3 }" | tr "\n" " ")" = "60x29 59x29 " ]'
+ttv =th2:
+check "ttv in a window with a tth bar moves the bar to the right" 'ttv_bar th2 && [ "$(ttops_in th2)" = 1 ] && [ "$(geom th2 | wc -l)" = 3 ]'
+tth =th2:
+check "and tth moves it back to the bottom" 'tth_bar th2 && [ "$(ttops_in th2)" = 1 ] && [ "$(geom th2 | wc -l)" = 3 ]'
+$T new-session -d -s th5 -x 120 -y 40 "'$HERE/ttop' -v"   # ttop is the whole window: not a bar to move
+check "tth leaves alone a window that is all ttop, and does not close it" \
+  'out=$(tth =th5: 2>&1); [ $? = 1 ] && [[ $out == *"not as a bar"* ]] && [ "$(geom th5 | wc -l)" = 1 ]'
+$T kill-session -t =th5
+$T new-session -d -s th4 -x 120 -y 29 "sleep 600"
+check "tth leaves alone a window of 29 lines" \
+  'out=$(tth =th4: 2>&1); [ $? = 1 ] && [[ $out == *"29 lines high"* ]] && [ "$(geom th4 | wc -l)" = 1 ]'
+$TT new-session -d -s thterm -x 120 -y 62 "env -u TMUX tmux -L $SRV attach -t =th1"
+retry client_on th1
+bar_h() { [ "$($T list-panes -t =th1: -F '#{pane_height}' | tail -1)" = "$1" ]; }
+$TT resize-window -t thterm -x 120 -y 82
+check "a window gets taller: the tth bar grows with it, to 12 lines at most" 'retry bar_h 12'
+$TT resize-window -t thterm -x 120 -y 42
+check "a window gets shorter: the tth bar keeps 10 lines at least" 'retry bar_h 10'
+$TT kill-session -t thterm
+for s in th1 th2 th4; do $T kill-session -t "=$s"; done
 
 # Resize in proportion. tmux takes the same number of columns from each pane,
 # so the ttv bar went down to 1 column. tls's window-resized hook gives the

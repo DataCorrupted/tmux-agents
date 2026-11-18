@@ -23,11 +23,11 @@ mkdir -p "$bin"
 put() {  # put SRC MODE NAME: copy, then rename into place, so a running hook never sees half a file
     install -m "$2" "$1" "$bin/.$3.tmp" && mv -f "$bin/.$3.tmp" "$bin/$3"
 }
-for f in tls ttop ttv tls-test; do
+for f in tls ttop ttv tth tls-test; do
     put "$src/bin/$f" 755 "$f"
 done
 put "$src/shell/tmux-agents.bash" 644 tmux-agents.bash
-echo "installed tls, ttop, ttv, tls-test and tmux-agents.bash in $bin"
+echo "installed tls, ttop, ttv, tth, tls-test and tmux-agents.bash in $bin"
 cfg=${XDG_CONFIG_HOME:-$HOME/.config}/tmux-agents
 if [ -e "$cfg/tls.conf" ]; then  # yours: never overwritten
     echo "kept your settings in $cfg/tls.conf (tls config shows them)"

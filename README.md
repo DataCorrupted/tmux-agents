@@ -45,7 +45,8 @@ tmux-agents fixes both problems.
   same number of columns from each pane, so narrow panes almost go away.
 - **Window presets.** `t -p` opens a new session that is already split for work: two panes
   side by side, and a bar with ttop, on the right of a wide window or at the bottom. `ttv`
-  adds a ttop bar on the right of the window you are in, whatever its panes are.
+  and `tth` add a ttop bar on the right or at the bottom of the window you are in, whatever
+  its panes are.
 - **Shell helpers for bash.** `t`, `trm` and `tmv` open, kill and rename sessions. They match
   session names exactly. Plain tmux takes `-t foo` to mean `foobar` when there is no `foo`.
   `t` and `tmv` refuse names that tmux can misread, such as `-p` or `foo.bar`.
@@ -81,7 +82,7 @@ cd ~/tmux-agents
 echo '. ~/.local/bin/tmux-agents.bash' >> ~/.bashrc
 ```
 
-The installer copies `tls`, `ttop`, `ttv`, `tls-test` and `tmux-agents.bash` into
+The installer copies `tls`, `ttop`, `ttv`, `tth`, `tls-test` and `tmux-agents.bash` into
 `~/.local/bin`, and the settings file `tls.conf` into `~/.config/tmux-agents/` (only if you
 do not have one there).
 Use `--bin DIR` for a different directory. Then the installer runs `tls setup`:
@@ -207,12 +208,13 @@ on the title line.
 To use the presets each time, add `alias t='t -p'` and `alias tt='ttop -p'` to
 `~/.bashrc`, after the line for `tmux-agents.bash`.
 
-### A bar in any window (ttv)
+### A bar in any window (ttv, tth)
 
 `ttv` adds a bar with `ttop -v` to the tmux window that you are in. The bar is 25 columns
 wide and as high as the window, on the right. The numbers in this section are defaults:
-the `[ttv]` section of the [settings file](#settings) changes them. The window can have any panes. Each pane
-keeps its height, and gives up width in proportion to its width. For example, in a window
+the `[ttv]` and `[tth]` sections of the [settings file](#settings) change them. The window
+can have any panes. Each pane keeps its height, and gives up width in proportion to its
+width. For example, in a window
 of 101 columns, two panes of 50 columns become two panes of 37 columns. The bar and its
 border take the other 26 columns. The cursor stays in your pane.
 
@@ -220,10 +222,27 @@ border take the other 26 columns. The cursor stays in your pane.
 equal parts, because tmux does it that way: panes of 50 and 50 columns come back as 50 and
 50, but panes of 30 and 70 columns come back as 35 and 65.
 
-ttv does nothing in a window of 80 columns or less. In a window that already has a ttv bar,
-ttv sets the bar back to 25 columns, for example after a drag. It does nothing in a window
-with a different ttop pane, such as the bar of a preset. `ttv WINDOW` adds the bar to a
-different window, for example `ttv =main:1`. ttv works in all shells.
+`tth` does the same at the bottom of the window, for a screen that is taller than wide. Its
+bar has `ttop -h`, is 10 lines high and as wide as the window, and each pane gives up
+height in proportion to its height.
+
+```
+ttv                                     tth
+┌─────────────┬─────────────┬───────┐   ┌─────────────┬─────────────┐
+│             │             │ ttop  │   │             │             │
+│    shell    │    shell    │ -v    │   │    shell    │    shell    │
+│             │             │       │   │             │             │
+│             │             │ 25    │   ├─────────────┴─────────────┤
+│             │             │ cols  │   │ ttop -h, 10 lines         │
+└─────────────┴─────────────┴───────┘   └───────────────────────────┘
+```
+
+ttv does nothing in a window of 80 columns or less, and tth in a window of 29 lines or
+less. In a window that already has its bar, ttv sets the bar back to 25 columns, and tth to
+10 lines, for example after a drag. A bar on the other side moves: after you turn a screen,
+run tth in a window with a ttv bar, and the bar goes to the bottom. They do nothing in a
+window with a ttop pane that is not a bar. `ttv WINDOW` and `tth WINDOW` work on a
+different window, for example `ttv =main:1`. ttv and tth work in all shells.
 
 ### Window resize
 
@@ -231,8 +250,8 @@ When a window changes size, for example when you go from a 21:9 monitor to a 16:
 monitor, tmux takes the same number of columns from each pane, until a pane has only 1
 column. So a narrow pane, such as the ttv bar, almost goes away, and a wide pane keeps most
 of its width. tls changes this. After each resize, each split keeps its proportions, and a
-ttop bar keeps its width. A bar from ttv changes with the window too, but it stays 25 to 30
-columns wide. When you go back to the old size, you get your old layout back exactly.
+ttop bar keeps its size. A bar from ttv changes with the window too, but it stays 25 to 30
+columns wide, and a bar from tth 10 to 12 lines high. When you go back to the old size, you get your old layout back exactly.
 
 For example, take panes of 200 and 73 columns and the ttv bar, and make the window go from
 300 to 200 columns. tmux alone makes them 162, 35 and 1 columns. With tls, they become 127,
@@ -241,7 +260,7 @@ For example, take panes of 200 and 73 columns and the ttv bar, and make the wind
 tls keeps the last layout that you made in each window: after a split, a close or a drag.
 It does not keep a layout that tmux made for a new size. tls adds its tmux hooks by itself:
 when the state of an agent changes and its tmux server does not have the hooks of this tls
-(a new server, an update, or a new setting), and when you run `ttop`, `ttv` or
+(a new server, an update, or a new setting), and when you run `ttop`, `ttv`, `tth` or
 `tls setup`. To use the tmux way again, set `proportional = off` in the `[resize]` section
 of the [settings file](#settings).
 
@@ -325,6 +344,7 @@ change. `tls config --defaults` prints the file with the defaults.
 | --- | --- |
 | `[ttop]` | `layout` (auto, vertical, horizontal: ttop with neither `-v` nor `-h`), `narrow`, `short`, `fit-min-width`, `fit-max-width` |
 | `[ttv]` | `width`, `min-width`, `max-width`, `min-window`, `options` (the ttop options of the bar) |
+| `[tth]` | `height`, `min-height`, `max-height`, `min-window`, `options` |
 | `[preset]` | `layout` (auto, right, bottom), `wide`, `pane-width`, `right-width`, `bottom-min-lines`, `bottom-max-lines` |
 | `[resize]` | `proportional` (on, off) |
 | `[agents]` | `claude`, `commands`, `keep-dead-days` |
@@ -346,7 +366,7 @@ Environment variables win over the file:
 | --- | --- |
 | `bin/tls` | The dashboard and the agent interface, in one Python file. |
 | `bin/ttop` | A short script that runs `tls top`. |
-| `bin/ttv` | A short script that runs `tls bar`. |
+| `bin/ttv`, `bin/tth` | Short scripts that run `tls bar right` and `tls bar bottom`. |
 | `bin/tls-test` | The self-test. |
 | `shell/tmux-agents.bash` | The bash helpers. |
 | `config/tls.conf` | The settings file, with each setting at its default (`tls config --defaults`). |
@@ -358,7 +378,7 @@ Environment variables win over the file:
 ## Tests
 
 ```sh
-bin/tls-test     # about 150 checks on throwaway tmux servers
+bin/tls-test     # about 160 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux
