@@ -24,6 +24,7 @@ cleanup() {
 trap cleanup EXIT
 
 export TLS_STATE_DIR="$D/state"   # tls has to create it
+export TLS_CONFIG="$D/tls.conf"   # not yours: no file, so every setting is at its default
 touch "$D/transcript.jsonl"
 SID=11111111-2222-3333-4444-555555555555
 
@@ -623,16 +624,20 @@ ttv =rs:
 G0=$(geom rs)
 $TT new-session -d -s rsterm -x 300 -y 61 "env -u TMUX tmux -L $SRV attach -t =rs"
 retry client_on rs
-in_proportion() {  # in_proportion BEFORE: in rs, the bar keeps 25 columns, and the two panes share the rest as in BEFORE (geom)
-  geom rs | awk -v before="$1" -v W="$($T display -p -t =rs: '#{window_width}')" '
+in_proportion() {  # in_proportion BEFORE BAR: in rs, the bar has BAR columns, and the two panes share the rest as in BEFORE (geom)
+  geom rs | awk -v before="$1" -v bar="$2" -v W="$($T display -p -t =rs: '#{window_width}')" '
     BEGIN { split(before, b, "\n"); split(b[1], p, " "); a0 = p[2]; split(b[2], p, " "); b0 = p[2] }
     { w[NR] = $2 }
-    END { room = W - 27; d = w[1] - room * a0 / (a0 + b0); exit !(NR == 3 && w[3] == 25 && w[1] + w[2] == room && d * d < 1) }'
+    END { room = W - bar - 2; d = w[1] - room * a0 / (a0 + b0); exit !(NR == 3 && w[3] == bar && w[1] + w[2] == room && d * d < 1) }'
 }
 $TT resize-window -t rsterm -x 200 -y 61
-check "a window gets narrower: its panes keep their proportions, and the ttv bar its 25 columns" 'retry in_proportion "$G0"'
+check "a window gets narrower: its panes keep their proportions, and the ttv bar 25 columns at least" 'retry in_proportion "$G0" 25'
 $TT resize-window -t rsterm -x 300 -y 61
 check "back at the old size, the old layout comes back exactly" 'retry same_geom rs "$G0"'
+$TT resize-window -t rsterm -x 400 -y 61
+check "a window gets wider: the ttv bar grows with it, to 30 columns at most" 'retry in_proportion "$G0" 30'
+$TT resize-window -t rsterm -x 300 -y 61
+retry same_geom rs "$G0"
 $T new-session -d -s rs2 -x 300 -y 60 "sleep 600"
 $T split-window -d -h -l 99 -t =rs2: "sleep 600"; $T split-window -d -v -l 20 -t =rs2:.1 "sleep 600"
 $T switch-client -c "$($T list-clients -t =rs -F '#{client_name}')" -t =rs2
@@ -650,11 +655,13 @@ drag_kept() { geom rs2 | awk 'NR == 1 { d = $2 - 100 * 299 / 199; exit !(d * d <
 check "a change you make at the new size is what the next resize keeps" 'retry drag_kept'
 $T switch-client -c "$($T list-clients -t =rs2 -F '#{client_name}')" -t =rs
 retry client_on rs
-$T set -g @tls-proportional off
+printf '[resize]\nproportional = off\n' > "$TLS_CONFIG"
 $TT resize-window -t rsterm -x 200 -y 61
+width_is() { [ "$($T display -p -t "=$1:" '#{window_width}')" = "$2" ]; }
+retry width_is rs 200; sleep 1   # time for a relayout, if one runs: tmux's layout shows until then
 bar_crushed() { [ "$(geom rs | awk 'END { print $2 }')" -lt 25 ]; }
-check "tmux set -g @tls-proportional off: tmux resizes the panes its own way" 'retry bar_crushed'
-$T set -gu @tls-proportional
+check "proportional = off in tls.conf: tmux resizes the panes its own way" 'bar_crushed'
+rm -f "$TLS_CONFIG"
 $TT kill-session -t rsterm
 $T new-session -d -s rs3 -x 200 -y 50 "sleep 600"; $T split-window -d -h -t =rs3: "sleep 600"
 $T set -wu -t =rs3: @tls-base; $T set -wu -t =rs3: @tls-size   # as if it was split before tls added its hooks
@@ -663,6 +670,41 @@ ttv =rs4:   # adds the hooks again
 check "a window split before tls added its hooks gets its layout of then kept" \
   '[ "$($T show -wv -t =rs3: @tls-base)" = "$($T display -p -t =rs3: "#{window_layout}")" ] && [ "$($T show -wv -t =rs3: @tls-size)" = 200x50 ]'
 for s in rs rs2 rs3 rs4; do $T kill-session -t "=$s"; done
+# The hooks come back by themselves: an agent's report finds that the tmux
+# server lacks them (as after an update of tls, or a new server) and adds them.
+for h in client-attached client-session-changed session-window-changed after-select-pane pane-focus-in \
+         window-layout-changed window-resized; do $T set-hook -gu "$h[42]"; done
+$T set -gu @tls-hooks
+$T new-session -d -s mk "sleep 600"
+TMUX="$SOCK,1,0" TMUX_PANE="$($T display -p -t =mk: '#{pane_id}')" "$TLS" report id=mark-0001 agent=codex pid=$$ state=busy
+check "an agent's report adds the hooks again to a tmux server that lacks them" \
+  '$T show-hooks -gw | grep -q "^window-resized\[42\] .*relayout" && [ "$($T show-hooks -g | grep -cF "$TLS seen")" = 4 ] &&
+   [ -n "$($T show -gv @tls-hooks)" ]'
+"$TLS" forget mark-0001; $T kill-session -t =mk
+
+# Settings: defaults in tls, the settings file over them, an environment
+# variable over both. The file in config/ is the one install.sh puts in place.
+[ -f "$HERE/../config/tls.conf" ] &&
+  check "config/tls.conf is what tls config --defaults prints" 'cmp -s <("$TLS" config --defaults) "$HERE/../config/tls.conf"'
+printf '[ttv]\nwidth = 28\n' > "$TLS_CONFIG"
+$T new-session -d -s cf -x 120 -y 30 "sleep 600"
+ttv =cf:
+check "a setting in tls.conf changes the default: a ttv bar of 28 columns" \
+  '[ "$($T list-panes -t =cf: -F "#{pane_width}" | tail -1)" = 28 ]'
+$T kill-session -t =cf
+printf '[ttv]\nwidth = wide\nmax-width = 34  # a comment\ncolour = red\n[preset]\nlayout = right\n' > "$TLS_CONFIG"
+TLS_PRESET=bottom "$TLS" config > "$D/config.out"
+check "tls config shows the value of each setting, where it comes from, and the lines that tls ignores" \
+  'grep -qx "width = 25" "$D/config.out" && grep -qx "max-width = 34  # from tls.conf \[ttv\]" "$D/config.out" &&
+   grep -qx "# ignored: tls.conf \[ttv\]: width = wide: use a whole number" "$D/config.out" &&
+   grep -qx "# ignored: tls.conf \[ttv\]: no setting colour" "$D/config.out"'
+check "an environment variable wins over tls.conf" 'grep -qx "layout = bottom  # from TLS_PRESET" "$D/config.out"'
+printf '[ttop]\nlayout = vertical\n' > "$TLS_CONFIG"
+CV=$($TT new-session -d -P -F '#{pane_id}' -s confv -x 160 -y 20 \
+  "env -u TMUX TLS_STATE_DIR='$D/state' TLS_TMUX='-L $SRV' '$HERE/ttop'")
+check "layout = vertical in tls.conf: plain ttop is vertical in a window where auto is horizontal" 'retry hint_v "$CV"'
+$TT kill-session -t confv
+rm -f "$TLS_CONFIG"
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,

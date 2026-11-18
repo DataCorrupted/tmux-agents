@@ -5,6 +5,7 @@
 #   --tmux-conf   also install config/tmux.conf as ~/.tmux.conf (a changed old one is backed up)
 #   --no-setup    skip `tls setup` (Claude Code hooks in ~/.claude/settings.json, tmux hooks)
 # The files go in as regular files, not symlinks, so dotfile syncers copy them too.
+# The settings file goes to ~/.config/tmux-agents/tls.conf, if there is none yet.
 set -euo pipefail
 src=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 bin=$HOME/.local/bin conf=0 setup=1
@@ -13,7 +14,7 @@ while [ $# -gt 0 ]; do
         --bin) bin=${2:?--bin needs a directory}; shift 2 ;;
         --tmux-conf) conf=1; shift ;;
         --no-setup) setup=0; shift ;;
-        -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "install.sh: unknown option $1 (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -27,6 +28,13 @@ for f in tls ttop ttv tls-test; do
 done
 put "$src/shell/tmux-agents.bash" 644 tmux-agents.bash
 echo "installed tls, ttop, ttv, tls-test and tmux-agents.bash in $bin"
+cfg=${XDG_CONFIG_HOME:-$HOME/.config}/tmux-agents
+if [ -e "$cfg/tls.conf" ]; then  # yours: never overwritten
+    echo "kept your settings in $cfg/tls.conf (tls config shows them)"
+else
+    mkdir -p "$cfg" && install -m 644 "$src/config/tls.conf" "$cfg/tls.conf" &&
+        echo "installed $cfg/tls.conf: every setting at its default, commented out"
+fi
 
 if [ "$conf" = 1 ]; then
     if [ -e ~/.tmux.conf ] && ! cmp -s "$src/config/tmux.conf" ~/.tmux.conf; then

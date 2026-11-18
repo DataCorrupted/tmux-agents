@@ -60,8 +60,9 @@ later steps in the clone.
 
 ## 3. Choose the bin directory
 
-The installer copies five files into one directory. The default is `~/.local/bin`. This
-directory must be on `PATH`:
+The installer copies five files into one directory. The default is `~/.local/bin`. It also
+puts the settings file `tls.conf` in `~/.config/tmux-agents/`, but only if that file does not
+exist yet. The bin directory must be on `PATH`:
 
 ```sh
 case ":$PATH:" in *":$HOME/.local/bin:"*) echo "on PATH" ;; *) echo "not on PATH" ;; esac
@@ -102,6 +103,8 @@ Without setup, tmux gets its hooks when the first agent reports from a tmux pane
 Check the output:
 
 - The first line is `installed tls, ttop, ttv, tls-test and tmux-agents.bash in <dir>`.
+- The second line tells where the settings file is: `installed ~/.config/tmux-agents/tls.conf`,
+  or `kept your settings` if the user had one already.
 - If `~/.bashrc` does not load the helpers yet, the installer prints the lines for step 5.
 - Setup prints one line for each change, and then the list of tmux sessions.
 - If the output has a `note` line, the bin directory is not on `PATH`, or a different
@@ -177,7 +180,8 @@ code, so tell the user to quit it with `q` and start it again.
 ## Uninstall
 
 1. Delete `tls`, `ttop`, `ttv`, `tls-test` and `tmux-agents.bash` from the bin directory. If the
-   user put a `tmux-agent-classify` there, ask before you delete it.
+   user put a `tmux-agent-classify` there, ask before you delete it. Also ask before you delete
+   `~/.config/tmux-agents/`, because the user can have changed the settings in it.
 2. In `~/.claude/settings.json`, delete each hook whose command ends in `tls hook`. Do not
    restore the backup instead, because it does not have the later changes.
 3. In `~/.bashrc`, delete the `tmux-agents.bash` line and the `tmux_autostart` line. If

@@ -9,8 +9,12 @@
                       -f: ttop fits its tmux pane to the list
   ttv [WINDOW]        add a bar with ttop -v, 25 columns wide and as high as
                       the window, on the right of this tmux window (or
-                      WINDOW) if it is over 80 columns wide; the panes there
+                      WINDOW) if it is 81 columns wide or more; the panes there
                       give up room in proportion to their widths (= tls bar)
+  tls config [--defaults]
+                      the settings that tls uses, and the lines of the
+                      settings file that it ignores; --defaults: the settings
+                      file with each setting at its default, commented out
   tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
                       splits, and each dead agent's resume command in its pane
   tls forget ID       drop a dead agent from the list
@@ -24,6 +28,10 @@
   tls hook [claude]   the Claude Code adapter: a hook event on stdin becomes a
                       report (never prints)
   tls seen PANE       tmux hook: you looked at PANE, so its green dot turns grey
+
+Settings: ~/.config/tmux-agents/tls.conf (or TLS_CONFIG) changes the numbers
+and the default behaviors below; each one has a default in tls, and an
+environment variable wins over the file. `tls config` shows them all.
 
 Columns: session, dot and status, agent name, age, summary. A session with one
 agent is one row. A session with no agent or several has a row of its own, and
@@ -49,10 +57,10 @@ window at most. Horizontal: as high as the list and its title, 2 lines to a
 third of the window. The preset bars use it.
 
 Resize: when a window changes size, its panes keep their proportions, and a
-ttop bar keeps its width (a bar without -f at least 25 columns); back at the
-old size, the old layout comes back. tmux alone takes the same number of
-columns from each pane, so narrow panes go down to 1 column. To stop it:
-tmux set -g @tls-proportional off.
+ttop bar keeps its width; a ttv bar changes too, but stays 25 to 30 columns
+wide. Back at the old size, the old layout comes back. tmux alone takes the
+same number of columns from each pane, so narrow panes go down to 1 column.
+To stop it: proportional = off in the [resize] section of the settings file.
 
 Presets (t -p, ttop -p, tls preset): a wide window, such as on a 21:9 monitor
 (2.25:1 in pixels or wider, with room for two 80-column panes), gets a bar of
@@ -80,7 +88,8 @@ blue busy (hollow: turn over, background task still running) · grey idle ·
 
 State: one JSON file per agent session in ~/.local/state/agent-tls/, mirrored
 into the tmux pane options @agent-state and @agent-session. Agents report how
-to resume them; TLS_CLAUDE sets the command for Claude (default: claude). How it works: comments at the top of
+to resume them; [agents] claude in the settings file, or TLS_CLAUDE, sets the
+command for Claude (default: claude). How it works: comments at the top of
 this file.
 """
 # How it works
@@ -120,8 +129,12 @@ this file.
 # for a new size, which is not the size in @tls-size, and not the one that tls
 # applied (@tls-applied). window-resized runs `tls relayout`, which scales
 # @tls-base to the new size: each split keeps its proportions, and a ttop bar
-# keeps its size (a bar without -f at least 25 columns). Back at the old size,
-# the old layout comes back exactly. `tmux set -g @tls-proportional off` stops it.
+# keeps its size along its split; a ttv bar (without -f) changes in proportion
+# too, within [ttv] min-width and max-width. Back at the old size, the old
+# layout comes back exactly. [resize] proportional = off stops it. The hooks
+# come with a mark, @tls-hooks: when an agent's state changes and the mark of
+# its tmux server is not the one of this tls (a new server, an update, a new
+# setting), tls adds its hooks again.
 #
 # An agent is dead when its process is gone (PID plus start time) or the boot ID
 # changed. A deliberate quit (/exit, /clear, logout) deletes the record; a kill
@@ -168,19 +181,176 @@ sys.dont_write_bytecode = True  # loading the classifier must not leave __pycach
 HOME = os.path.expanduser("~")
 STATE_DIR = os.environ.get("TLS_STATE_DIR") or os.path.join(HOME, ".local", "state", "agent-tls")
 TMUX_ARGS = os.environ.get("TLS_TMUX", "").split()  # e.g. "-L test", for tests
-CLAUDE = os.environ.get("TLS_CLAUDE") or "claude"  # command typed to resume an agent
 SELF = os.path.realpath(__file__)
 CLASSIFIER = os.path.join(os.path.dirname(SELF), "tmux-agent-classify")
 HOST = socket.gethostname()
 SID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}")  # a session id; also a file name
 DELIBERATE_END = {"prompt_input_exit", "clear", "logout"}  # SessionEnd reasons: user quit on purpose
-GONE_MAX_AGE = 14 * 86400
 RESUME_GRACE = 120
 DELETED_TTL = 60  # a record deleted in ttop stays this long, to swallow its dying agent's hooks
 SHELLS = {"bash", "zsh", "sh", "dash", "fish", "ksh", "tcsh"}  # a pane at a prompt: safe to type into
 SERVER_ID = "#{pid}:#{start_time}"  # one tmux server's life: pane and window ids restart with it
-# Panes running one of these count as agents even before they report.
-AGENT_COMMANDS = set((os.environ.get("TLS_AGENT_COMMANDS") or "claude codex gemini").split())
+
+# ── settings ─────────────────────────────────────────────────────────────────
+# Each setting has its default here. The settings file (config_path) changes
+# any of them, and an environment variable in SETTING_ENV wins over both.
+# `tls config --defaults` prints the file that install.sh puts in place, with
+# each setting at its default and commented out (config/tls.conf).
+
+TTOP_FLAGS = ("-v", "-h", "-p", "-f", "--vertical", "--horizontal", "--preset", "--fit")
+SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, int, float, str, "words" or "ttop"
+    ("ttop", "layout", "auto", ("auto", "vertical", "horizontal"),
+     "The layout of ttop with neither -v nor -h. auto: vertical in a narrow window, "
+     "or in a window taller than wide, else horizontal."),
+    ("ttop", "narrow", 60, int, "auto: ttop is vertical in a window narrower than this many columns."),
+    ("ttop", "short", 12, int,
+     "In a window with fewer lines than this, ttop has no blank lines, and its key hint is on the title line."),
+    ("ttop", "fit-min-width", 16, int, "ttop -f: the fewest columns of a vertical pane."),
+    ("ttop", "fit-max-width", 40, int, "ttop -f: the most columns of a vertical pane. It also gets a third of the window at most."),
+    ("ttv", "width", 25, int, "The width of the bar that ttv adds, in columns."),
+    ("ttv", "min-width", 25, int,
+     "When the window changes size, the bar changes in proportion, but it keeps this many columns at least."),
+    ("ttv", "max-width", 30, int, "When the window changes size, the bar gets this many columns at most."),
+    ("ttv", "min-window", 81, int, "ttv adds a bar only to a window at least this many columns wide."),
+    ("ttv", "options", "-v", "ttop",
+     "The ttop options of the bar. With -f, ttop fits the bar to the list, and min-width and max-width do not apply."),
+    ("preset", "layout", "auto", ("auto", "right", "bottom"),
+     "Where t -p, ttop -p and tls preset put the bar. auto: on the right of a wide window, else at the bottom."),
+    ("preset", "wide", 2.25, float,
+     "A window is wide from this width/height ratio in pixels on: 21:9 is 2.33, 16:9 is 1.78."),
+    ("preset", "pane-width", 80, int, "A wide window must also have room for two panes this many columns wide next to the bar."),
+    ("preset", "right-width", 25, int, "The width of a bar on the right, until its ttop fits it to the list."),
+    ("preset", "bottom-min-lines", 5, int,
+     "A bar at the bottom starts at a fifth of the window, with this many lines at least, until its ttop fits it."),
+    ("preset", "bottom-max-lines", 10, int, "A bar at the bottom starts with this many lines at most."),
+    ("resize", "proportional", "on", ("on", "off"),
+     "on: when a window changes size, its panes keep their proportions, and a ttop bar keeps its size "
+     "(a ttv bar: see [ttv]). off: tmux takes the same number of columns from each pane."),
+    ("agents", "claude", "claude", str, "The command that resumes a Claude Code session, as: claude --resume ID."),
+    ("agents", "commands", "claude codex gemini", "words",
+     "A pane that runs one of these commands shows as an agent before the agent reports."),
+    ("agents", "keep-dead-days", 14, int, "A dead agent stays in the list this many days, or until its transcript goes."),
+)
+SETTING_ENV = {"TLS_PRESET": ("preset", "layout"), "TLS_CLAUDE": ("agents", "claude"),
+               "TLS_AGENT_COMMANDS": ("agents", "commands")}
+SETTING_PAIRS = ((("ttop", "fit-min-width"), ("ttop", "fit-max-width")), (("ttv", "min-width"), ("ttv", "max-width")),
+                 (("preset", "bottom-min-lines"), ("preset", "bottom-max-lines")))
+_CONF = None  # (values, sources, problems), when a setting is first needed
+
+
+def config_path():
+    return os.environ.get("TLS_CONFIG") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "tmux-agents", "tls.conf")
+
+
+def setting(text, kind):
+    """text as a value of this kind of setting; ValueError if it is not one."""
+    text = text.strip()
+    if isinstance(kind, tuple):
+        if text.lower() not in kind:
+            raise ValueError("use " + " or ".join(kind))
+        return text.lower()
+    if kind in (int, float):
+        try:
+            n = kind(text)
+        except ValueError:
+            raise ValueError("use a %snumber" % ("whole " if kind is int else "")) from None
+        if not n > 0:
+            raise ValueError("use a number over 0")
+        return n
+    words = text.split()
+    if not words:
+        raise ValueError("use a value")
+    bad = [w for w in words if kind == "ttop" and w not in TTOP_FLAGS]
+    if bad:
+        raise ValueError("ttop has no option %s" % bad[0])
+    return tuple(words) if kind in ("words", "ttop") else text
+
+
+def load_conf():
+    """(values, sources, problems): each setting from its default, then the
+    settings file, then the environment; sources: where a value that is not
+    the default comes from; problems: what tls ignored, and why."""
+    import configparser
+    kinds = {(s, k): kind for s, k, _, kind, _ in SETTINGS}
+    values = {(s, k): setting(str(d), kind) for s, k, d, kind, _ in SETTINGS}
+    sources, problems, found, path = {}, [], [], config_path()
+    parser = configparser.ConfigParser(inline_comment_prefixes=("#",), interpolation=None, strict=False)
+    try:
+        with open(path) as f:
+            parser.read_file(f)
+        found = [(sec, key, text, "%s [%s]" % (os.path.basename(path), sec))
+                 for sec in parser.sections() for key, text in parser.items(sec)]
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError, configparser.Error) as e:
+        problems.append("%s: %s" % (path, " ".join(str(e).split())))
+    found += [(sk[0], sk[1], os.environ[var], var) for var, sk in SETTING_ENV.items() if os.environ.get(var)]
+    for sec, key, text, where in found:
+        if (sec, key) not in kinds:
+            problems.append("%s: no setting %s" % (where, key))
+            continue
+        try:
+            values[sec, key], sources[sec, key] = setting(text, kinds[sec, key]), where
+        except ValueError as e:
+            problems.append("%s: %s = %s: %s" % (where, key, text.strip(), e))
+    for lo, hi in SETTING_PAIRS:
+        if values[lo] > values[hi]:
+            problems.append("%s %s is more than %s %s: both stay at their defaults" % (lo[1], values[lo], hi[1], values[hi]))
+            for sk in (lo, hi):
+                values[sk] = setting(str(next(d for s, k, d, _, _ in SETTINGS if (s, k) == sk)), kinds[sk])
+                sources.pop(sk, None)
+    return values, sources, problems
+
+
+def conf(section, key):
+    """The value of a setting (load_conf, once for each process)."""
+    global _CONF
+    if _CONF is None:
+        try:
+            _CONF = load_conf()
+        except Exception as e:  # a hook must never fail over its settings
+            _CONF = ({(s, k): setting(str(d), kind) for s, k, d, kind, _ in SETTINGS}, {},
+                     ["%s: %s" % (config_path(), e)])
+    return _CONF[0][section, key]
+
+
+def conf_problems():
+    conf("ttop", "layout")
+    return _CONF[2]
+
+
+def config_text(defaults=False):
+    """tls config: the settings file with the value of each setting that tls
+    uses; defaults: with each setting at its default and commented out."""
+    import textwrap
+    note = lambda text: textwrap.wrap(text, 78, initial_indent="# ", subsequent_indent="# ")
+    show = lambda v: " ".join(v) if isinstance(v, tuple) else str(v)
+    if defaults:
+        lines = note("Settings of tmux-agents: tls, ttop, ttv and the presets. tls reads them from "
+                     "~/.config/tmux-agents/tls.conf, or from the file that TLS_CONFIG names.") + ["#"] + \
+            note("Each setting shows its default value. To change one, remove the # in front of it and "
+                 "change the value. ttop and tmux hooks read the file when they start. These environment "
+                 "variables win over the file: %s. `tls config` shows the values that tls uses, and the lines "
+                 "that it ignores." % ", ".join("%s ([%s] %s)" % (v, sk[0], sk[1]) for v, sk in SETTING_ENV.items()))
+    else:
+        conf("ttop", "layout")
+        lines = ["# The settings that tls uses: the defaults, then %s, then the environment." % config_path()]
+        lines += ["# ignored: " + problem for problem in _CONF[2]]
+    section = None
+    for sec, key, default, kind, text in SETTINGS:
+        if sec != section:
+            lines += ["", "[%s]" % sec]
+            section = sec
+        if defaults:
+            lines += note(text) + ["# %s = %s" % (key, show(setting(str(default), kind)))]
+        else:
+            where = _CONF[1].get((sec, key))
+            lines.append("%s = %s%s" % (key, show(conf(sec, key)), "  # from " + where if where else ""))
+    return "\n".join(lines) + "\n"
+
+
+# ── uses of the settings ──
 
 COLOR = {"blocked": 196, "waiting": 226, "done": 82, "working": 75, "bg": 75,
          "idle": 243, "?": 243, "gone": 244}
@@ -327,12 +497,14 @@ def sync_tmux(rec):
     if not t.get("pane") or not server:
         return
     pane = t["pane"]
-    out = tmux("display", "-p", "-t", pane, "#{session_name}\t#{window_index}\t#{window_name}\t" + SERVER_ID,
-               ";", "set", "-p", "-t", pane, "@agent-state", rec.get("state") or "",
+    out = tmux("display", "-p", "-t", pane, "#{session_name}\t#{window_index}\t#{window_name}\t" + SERVER_ID +
+               "\t#{@tls-hooks}", ";", "set", "-p", "-t", pane, "@agent-state", rec.get("state") or "",
                ";", "set", "-p", "-t", pane, "@agent-session", rec["session_id"], server=server)
     if out:
-        f = (out.splitlines()[0].split("\t") + ["", "", "", ""])[:4]
+        f = (out.splitlines()[0].split("\t") + [""] * 5)[:5]
         t.update(session=f[0], window=f[1], window_name=f[2], server=f[3])
+        if f[4] != hooks_mark():  # a new tmux server, or other hooks: after an update, or a new setting
+            register_tmux_hooks(server)
 
 
 def clear_tmux(rec):
@@ -349,20 +521,37 @@ KEEP_LAYOUT = ('if -F "#{&&:#{!=:#{window_layout},#{@tls-applied}},#{||:#{==:#{@
                'set -wF @tls-size "#{window_width}x#{window_height}" ; set -w @tls-applied "" }')
 
 
-def register_tmux_hooks(server=None):
-    """Have the tmux server run `tls seen` when you look at a green agent's
-    pane, and keep the proportions of the panes when a window changes size.
-    Idempotent; index [42] keeps these apart from your own hooks. A window
-    with splits that has no kept layout yet gets its layout of now."""
+def tmux_hooks():
+    """The tmux hooks of tls, as (name, command): `tls seen` when you look at
+    a green agent's pane, and with [resize] proportional on, the two that keep
+    the proportions of the panes when a window changes size."""
     run = 'if -F "#{==:#{@agent-state},done}" { run-shell -b "%s seen #{pane_id}" }' % shlex.quote(SELF)
-    relay = ('if -F "#{&&:#{@tls-base},#{&&:#{>:#{window_panes},1},#{!=:#{@tls-proportional},off}}}" '
-             '{ run-shell -b "%s relayout #{window_id}" }' % shlex.quote(SELF))
+    hooks = [(name, run) for name in SEEN_HOOKS]
+    if conf("resize", "proportional") == "on":
+        hooks += [("window-layout-changed", KEEP_LAYOUT),
+                  ("window-resized", 'if -F "#{&&:#{@tls-base},#{>:#{window_panes},1}}" '
+                                     '{ run-shell -b "%s relayout #{window_id}" }' % shlex.quote(SELF))]
+    return hooks
+
+
+def hooks_mark():
+    """A mark that changes with the hooks: a tmux server with another one in
+    @tls-hooks gets the hooks again (sync_tmux)."""
+    import zlib
+    return "%08x" % zlib.crc32(repr(tmux_hooks()).encode())
+
+
+def register_tmux_hooks(server=None):
+    """Add the hooks of tls (tmux_hooks) to the tmux server, at index [42],
+    which keeps them apart from your own hooks; with proportional off, take
+    the resize hooks away. Idempotent. A window with splits that has no kept
+    layout yet gets its layout of now."""
     args = []
-    for name in SEEN_HOOKS:
-        args += [";", "set-hook", "-g", name + "[42]", run]
-    args += [";", "set-hook", "-g", "window-layout-changed[42]", KEEP_LAYOUT,
-             ";", "set-hook", "-g", "window-resized[42]", relay]
-    if tmux(*args[1:], server=server) is None:
+    for name, cmd in tmux_hooks():
+        args += [";", "set-hook", "-g", name + "[42]", cmd]
+    if conf("resize", "proportional") == "off":
+        args += [";", "set-hook", "-gu", "window-layout-changed[42]", ";", "set-hook", "-gu", "window-resized[42]"]
+    if tmux(*args[1:], ";", "set", "-g", "@tls-hooks", hooks_mark(), server=server) is None:
         return False
     out = tmux("list-windows", "-a", "-F", "#{window_id}\t#{window_panes}\t#{@tls-size}\t"
                "#{window_width}x#{window_height}\t#{window_layout}", server=server)
@@ -655,8 +844,6 @@ def hook():
         if pid.isdigit():
             f["pid"] = pid
         rec, fresh = apply(rec, f)
-    if rec and fresh and pane_server(rec):
-        register_tmux_hooks(pane_server(rec))
 
 
 def report_cmd(argv):
@@ -688,8 +875,6 @@ def report_cmd(argv):
         raise ValueError("state must be busy, waiting, blocked, done, idle, background or finished")
     with Lock():
         rec, fresh = apply(load(f["id"]), f)
-    if rec and fresh and pane_server(rec):
-        register_tmux_hooks(pane_server(rec))
     return 0
 
 
@@ -971,13 +1156,13 @@ def snapshot():
             else:
                 outside.append(rec)
         elif ((rec.get("transcript") and not os.path.exists(rec["transcript"]))
-              or t - int(rec.get("event_at") or 0) > GONE_MAX_AGE):
+              or t - int(rec.get("event_at") or 0) > conf("agents", "keep-dead-days") * 86400):
             remove(rec["session_id"])  # can't be resumed any more
         else:
             gone.append(rec)
     for p in panes or []:
         rec = live.get(p["pane"])
-        if rec or p["cmd"] in AGENT_COMMANDS:
+        if rec or p["cmd"] in conf("agents", "commands"):
             by_name[p["session"]]["agents"].append({"pane": p["pane"], "window": p["window"],
                                                     "index": p["index"], "rec": rec})
     if panes:
@@ -1401,7 +1586,7 @@ def resume_cmd(rec):
     if rec.get("resume"):
         return rec["resume"]
     if rec.get("agent", "claude") == "claude":
-        return "%s --resume %s" % (CLAUDE, rec["session_id"])
+        return "%s --resume %s" % (conf("agents", "claude"), rec["session_id"])
     return ""
 
 
@@ -1661,11 +1846,6 @@ def session_name(taken):
     return str(i)
 
 
-BAR_COLS = 25  # the width of a bar on the right: a wide window's preset bar, and ttv's
-WIDE = 2.25    # preset: from this width/height in pixels on, a window is wide (21:9 is 2.33, 16:9 1.78)
-BAR_OVER = 80  # ttv adds a bar only to a window wider than this
-
-
 def window_size():
     """The size of a window shown here: this pane's window inside tmux, else
     the terminal's."""
@@ -1686,15 +1866,15 @@ def cell_size():
     return 1, 2
 
 
-def nested_right(w, h, a, b, bar):
+def nested_right(w, h, a, b, bar, cols):
     """The tmux layout of a w x h window with panes a and b side by side, and
-    pane bar on the right, BAR_COLS wide. a and b get a cell of their own, so
+    pane bar on the right, cols wide. a and b get a cell of their own, so
     that they share each change of the bar's width; tmux itself puts all
     three in one row, and gives the change to b alone."""
-    inner = w - BAR_COLS - 1
+    inner = w - cols - 1
     body = "%dx%d,0,0{%dx%d,0,0{%dx%d,0,0,%s,%dx%d,%d,0,%s},%dx%d,%d,0,%s}" % (
         w, h, inner, h, inner // 2, h, a.lstrip("%"), inner - 1 - inner // 2, h, inner // 2 + 1,
-        b.lstrip("%"), BAR_COLS, h, inner + 1, bar.lstrip("%"))
+        b.lstrip("%"), cols, h, inner + 1, bar.lstrip("%"))
     return tmux_layout(body)
 
 
@@ -1709,9 +1889,9 @@ def tmux_layout(body):
 def apply_preset(target):
     """Give window target, which has one pane, the preset layout: a bar with
     ttop -p -f, and the rest split into two panes side by side. A wide window
-    gets the bar on the right, BAR_COLS wide, with ttop -v; any other window
-    gets it at the bottom, 5 to 10 lines high, with ttop -h. TLS_PRESET=right
-    or bottom picks one. Returns an error message or None."""
+    gets the bar on the right, with ttop -v; any other window gets it at the
+    bottom, with ttop -h ([preset] in the settings). Returns an error message
+    or None."""
     out = tmux("display", "-p", "-t", target, "#{window_panes}\t#{window_width}\t#{window_height}\t"
                "#{pane_id}\t#{pane_current_path}")
     f = (out or "").rstrip("\n").split("\t")
@@ -1720,15 +1900,17 @@ def apply_preset(target):
     (panes, w, h), pane, cwd = map(int, f[:3]), f[3], f[4]
     if panes != 1:
         return "the window has %d panes; a preset needs a window with one" % panes
-    which = os.environ.get("TLS_PRESET", "")
-    if which not in ("right", "bottom"):  # by the shape, in pixels if tmux knows a cell's size
+    which, cols = conf("preset", "layout"), conf("preset", "right-width")
+    if which == "auto":  # by the shape, in pixels if tmux knows a cell's size
         cw, ch = cell_size()
-        which = "right" if w * cw >= WIDE * h * ch and w >= BAR_COLS + 2 * 80 + 2 else "bottom"
+        which = ("right" if w * cw >= conf("preset", "wide") * h * ch
+                 and w >= cols + 2 * conf("preset", "pane-width") + 2 else "bottom")
     ttop = shlex.quote(os.path.join(os.path.dirname(SELF), "ttop"))
     if os.environ.get("TLS_PRESET"):  # the bar's ttop makes its new sessions the same way
         ttop = "TLS_PRESET=%s %s" % (shlex.quote(os.environ["TLS_PRESET"]), ttop)
-    bar = (["-h", "-l", str(BAR_COLS), ttop + " -v -p -f"] if which == "right"
-           else ["-v", "-l", str(max(5, min(10, h // 5))), ttop + " -h -p -f"])
+    low, high = conf("preset", "bottom-min-lines"), conf("preset", "bottom-max-lines")
+    bar = (["-h", "-l", str(cols), ttop + " -v -p -f"] if which == "right"
+           else ["-v", "-l", str(max(low, min(high, h // 5))), ttop + " -h -p -f"])
     new = ("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", pane, "-c", cwd)
     side = tmux(*new, *bar)
     if side is None:
@@ -1737,14 +1919,15 @@ def apply_preset(target):
     if second is None:
         return "no room for the preset's second pane"
     if which == "right":  # at the bottom, the two panes already share a cell
-        tmux("select-layout", "-t", pane, nested_right(w, h, pane, second.strip(), side.strip()))
+        tmux("select-layout", "-t", pane, nested_right(w, h, pane, second.strip(), side.strip(), cols))
     return None
 
 
 def add_bar(target):
-    """ttv: add a bar with ttop -v, BAR_COLS wide and as high as the window,
-    along the right edge of window target. tmux takes the room from all the
-    panes, in proportion to their widths. Returns an error message or None."""
+    """ttv: add a bar with ttop ([ttv] options), [ttv] width columns wide and
+    as high as the window, along the right edge of window target. tmux takes
+    the room from all the panes, in proportion to their widths. Returns an
+    error message or None."""
     out = tmux("list-panes", "-t", target, "-F",
                "#{window_width}\t#{window_height}\t#{window_layout}\t#{pane_id}\t#{pane_start_command}")
     panes = [line.split("\t", 4) for line in (out or "").splitlines()]
@@ -1753,13 +1936,13 @@ def add_bar(target):
     bars = [p[3] for p in panes if len(p) == 5 and is_ttop(start_command(p[4]))]
     if bars:
         return "pane %s of the window already runs ttop; q there closes it" % bars[0]
-    w, h, layout = int(panes[0][0]), int(panes[0][1]), panes[0][2]
-    if w <= BAR_OVER:
-        return "the window is %d columns wide; a bar needs more than %d" % (w, BAR_OVER)
+    (w, h), layout, cols = map(int, panes[0][:2]), panes[0][2], conf("ttv", "width")
+    if w < conf("ttv", "min-window"):
+        return "the window is %d columns wide; a bar needs %d at least" % (w, conf("ttv", "min-window"))
     register_tmux_hooks()  # so that the bar keeps its width when the window changes size
     ttop = shlex.quote(os.path.join(os.path.dirname(SELF), "ttop"))
-    bar = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-f", "-h", "-l", str(BAR_COLS),
-               "-t", target, ttop + " -v")
+    bar = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-f", "-h", "-l", str(cols),
+               "-t", target, " ".join((ttop,) + conf("ttv", "options")))
     if bar is None:
         return "no room for the bar"
     # In a window split side by side, tmux puts the bar in the same row as the
@@ -1768,11 +1951,11 @@ def add_bar(target):
     # own, all the panes share them.
     if re.match(r"[0-9a-f]{4},\d+x\d+,0,0\{", layout):
         head = "%dx%d,0,0{" % (w, h)
-        side = "%dx%d,%d,0,%s}" % (BAR_COLS, h, w - BAR_COLS, bar.strip().lstrip("%"))
+        side = "%dx%d,%d,0,%s}" % (cols, h, w - cols, bar.strip().lstrip("%"))
         now = (tmux("display", "-p", "-t", target, "#{window_layout}") or "").strip()[5:]
         if now.startswith(head) and now.endswith("," + side):
             tmux("select-layout", "-t", target, tmux_layout("%s%dx%d,0,0{%s},%s" % (
-                head, w - BAR_COLS - 1, h, now[len(head):-len(side) - 1], side)))
+                head, w - cols - 1, h, now[len(head):-len(side) - 1], side)))
     return None
 
 
@@ -1866,15 +2049,18 @@ def scale_layout(c, w, h, bars, x=0, y=0):
     """Layout tree c resized to w x h at x, y: the cells of each split share
     its room in proportion to their old sizes. A ttop bar (bars: pane number
     to whether it has -f) keeps its size along its split while the other cells
-    have room; a bar without -f in a row gets BAR_COLS at least. None if the
-    panes do not fit."""
+    have room, but a bar without -f in a row, such as ttv's, changes in
+    proportion too, within [ttv] min-width and max-width. None if the panes
+    do not fit."""
     out = dict(c, w=w, h=h, x=x, y=y)
     if "pane" in c:
         return out
     wide, kids = c["kind"] == "{", c["cells"]
     room = (w if wide else h) - (len(kids) - 1)
-    keep = [None if k.get("pane") not in bars else k["h"] if not wide
-            else k["w"] if bars[k["pane"]] else max(k["w"], BAR_COLS) for k in kids]
+    ratio = room / ((c["w"] if wide else c["h"]) - (len(kids) - 1))
+    low, high = conf("ttv", "min-width"), conf("ttv", "max-width")
+    keep = [None if k.get("pane") not in bars else k["h"] if not wide else k["w"] if bars[k["pane"]]
+            else max(low, min(high, int(k["w"] * ratio + 0.5))) for k in kids]
     mins = [min_size(k, wide) for k in kids]
     flex = [i for i, n in enumerate(keep) if n is None]
     if not flex or sum(n for n in keep if n) + sum(mins[i] for i in flex) > room:
@@ -1898,6 +2084,8 @@ def scale_layout(c, w, h, bars, x=0, y=0):
 def relayout(window):
     """window-resized hook: give the panes of window the proportions of the
     last layout you made there (@tls-base), at the window's new size."""
+    if conf("resize", "proportional") == "off":
+        return
     out = tmux("list-panes", "-t", window, "-F", "\t".join((
         "#{window_width}", "#{window_height}", "#{window_zoomed_flag}", "#{window_layout}", "#{@tls-base}",
         "#{pane_id}", "#{pane_start_command}")), server=[])
@@ -1958,9 +2146,6 @@ def one_shot(vertical=False):
 
 HINT = "↑↓ select · enter or 1-9 open/resume · n new session · del delete · R resume all dead · q quit · * attached"
 HINT_V = "↑↓ enter n del R q"  # the vertical layout's, for a narrow window
-BAR_LINES = 12       # a window under this many lines is a bar: no blank lines, the hint on the title line
-NARROW = 60          # ttop with neither -v nor -h: vertical in a window under this many columns
-FIT_COLS = (16, 40)  # ttop -f: the width of a vertical pane, under NARROW so that it stays vertical
 DEL = ("\x7f", "\x08", "\033[3~")  # Backspace (the Mac delete key), ^H, forward Delete
 NAV = {"\033[A": "up", "\033OA": "up", "\033[B": "down", "\033OB": "down",
        "\033[5~": "pgup", "\033[6~": "pgdn",
@@ -2002,23 +2187,25 @@ def wrap(text, width, most=None, hang=""):
 
 def auto_vertical(size, cell):
     """ttop with neither -v nor -h: vertical in a window of size (columns,
-    lines) under NARROW columns, or taller than wide in pixels, such as a bar
-    on the right; cell is a cell's size in pixels."""
+    lines) under [ttop] narrow columns, or taller than wide in pixels, such as
+    a bar on the right; cell is a cell's size in pixels."""
     cols, lines = size
-    return cols < NARROW or lines * cell[1] > cols * cell[0]
+    return cols < conf("ttop", "narrow") or lines * cell[1] > cols * cell[0]
 
 
 def fit_size(rows, vertical, size, win, cell):
     """ttop -f: the size (columns, lines) of a pane that shows rows with no
     space left over; the other side stays as it is. Vertical: as wide as its
-    lines with nothing cut, in FIT_COLS and a third of the window win at most.
+    lines with nothing cut, within [ttop] fit-min-width and fit-max-width, and
+    a third of the window win at most.
     Horizontal: as high as the list and its title, 2 lines to a third of the
     window, and not taller than wide in pixels, so that it stays horizontal."""
     cols, lines = size
     if vertical:  # + 1: ttop stays off the last column
-        return max(FIT_COLS[0], min(natural_width(rows) + 1, FIT_COLS[1], win[0] // 3)), lines
+        return max(conf("ttop", "fit-min-width"),
+                   min(natural_width(rows) + 1, conf("ttop", "fit-max-width"), win[0] // 3)), lines
     body = sum(2 if "section" in r else 1 for r in rows) or 1  # as many lines as body_lines draws
-    want = 1 + body if 1 + body < BAR_LINES else 4 + body  # a bar has only its title line besides
+    want = 1 + body if 1 + body < conf("ttop", "short") else 4 + body  # a bar has only its title line besides
     return cols, max(2, min(want, win[1] // 3, cols * cell[0] // cell[1]))
 
 
@@ -2058,6 +2245,8 @@ def ttop(vertical=None, preset=False, fit_pane=False):
     sel = sel_id = None  # selected row, and its id to find it again after a refresh
     top = refresh_at = msg_until = 0
     msg, ask = "", None  # ask: (until, on Enter, on a dead agent's key) while a question is up
+    if conf_problems():
+        msg, msg_until = "tls.conf: %s · tls config" % conf_problems()[0], time.time() + 10
     try:
         while True:
             if time.time() >= refresh_at:
@@ -2083,7 +2272,7 @@ def ttop(vertical=None, preset=False, fit_pane=False):
             cols, lines = size
             width = cols - 1  # stay off the last column: no autowrap
             text = msg if time.time() < msg_until else ""
-            if lines < BAR_LINES:  # a bar, such as a preset's: no blank lines, the hint on the title line
+            if lines < conf("ttop", "short"):  # a bar, such as a preset's: no blank lines, the hint on the title line
                 head = [title(snap, "ttop", True, width, (HINT_V,) if vert else (HINT, HINT_V))]
                 foot = [dim(l, True) for l in wrap(text, width, 2)] if text else []
             else:
@@ -2244,7 +2433,8 @@ def main(argv):
         flags = {"-v": ("vertical", True), "--vertical": ("vertical", True), "-h": ("vertical", False),
                  "--horizontal": ("vertical", False), "-p": ("preset", True), "--preset": ("preset", True),
                  "-f": ("fit_pane", True), "--fit": ("fit_pane", True)}
-        opts = {"vertical": None, "preset": False, "fit_pane": False}  # vertical None: by the window's shape
+        opts = {"vertical": {"auto": None, "vertical": True, "horizontal": False}[conf("ttop", "layout")],
+                "preset": False, "fit_pane": False}  # vertical None: by the window's shape
         for a in argv[1:]:
             if a not in flags:
                 print(__doc__.strip())
@@ -2253,6 +2443,9 @@ def main(argv):
         if sys.stdin.isatty() and sys.stdout.isatty():
             return ttop(**opts)
         return one_shot(bool(opts["vertical"]))
+    if cmd == "config" and argv[1:] in ([], ["--defaults"]):
+        sys.stdout.write(config_text(defaults=argv[1:] == ["--defaults"]))
+        return 0
     if cmd == "bar" and len(argv) <= 2:  # ttv [WINDOW]
         target = argv[1] if len(argv) == 2 else os.environ.get("TMUX_PANE", "")
         if target.startswith("-"):

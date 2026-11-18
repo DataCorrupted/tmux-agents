@@ -82,7 +82,8 @@ echo '. ~/.local/bin/tmux-agents.bash' >> ~/.bashrc
 ```
 
 The installer copies `tls`, `ttop`, `ttv`, `tls-test` and `tmux-agents.bash` into
-`~/.local/bin`.
+`~/.local/bin`, and the settings file `tls.conf` into `~/.config/tmux-agents/` (only if you
+do not have one there).
 Use `--bin DIR` for a different directory. Then the installer runs `tls setup`:
 
 - Setup adds the Claude Code hooks to `~/.claude/settings.json`, with a backup.
@@ -209,7 +210,8 @@ To use the presets each time, add `alias t='t -p'` and `alias tt='ttop -p'` to
 ### A bar in any window (ttv)
 
 `ttv` adds a bar with `ttop -v` to the tmux window that you are in. The bar is 25 columns
-wide and as high as the window, on the right. The window can have any panes. Each pane
+wide and as high as the window, on the right. The numbers in this section are defaults:
+the `[ttv]` section of the [settings file](#settings) changes them. The window can have any panes. Each pane
 keeps its height, and gives up width in proportion to its width. For example, in a window
 of 101 columns, two panes of 50 columns become two panes of 37 columns. The bar and its
 border take the other 26 columns. The cursor stays in your pane.
@@ -228,17 +230,19 @@ When a window changes size, for example when you go from a 21:9 monitor to a 16:
 monitor, tmux takes the same number of columns from each pane, until a pane has only 1
 column. So a narrow pane, such as the ttv bar, almost goes away, and a wide pane keeps most
 of its width. tls changes this. After each resize, each split keeps its proportions, and a
-ttop bar keeps its width. A bar from ttv keeps at least 25 columns. When you go back to the
-old size, you get your old layout back exactly.
+ttop bar keeps its width. A bar from ttv changes with the window too, but it stays 25 to 30
+columns wide. When you go back to the old size, you get your old layout back exactly.
 
 For example, take panes of 200 and 73 columns and the ttv bar, and make the window go from
 300 to 200 columns. tmux alone makes them 162, 35 and 1 columns. With tls, they become 127,
 46 and 25 columns.
 
 tls keeps the last layout that you made in each window: after a split, a close or a drag.
-It does not keep a layout that tmux made for a new size. tls adds its tmux hooks when an
-agent starts, and when you run `ttop`, `ttv` or `tls setup`. To use the tmux way again, run
-`tmux set -g @tls-proportional off`.
+It does not keep a layout that tmux made for a new size. tls adds its tmux hooks by itself:
+when the state of an agent changes and its tmux server does not have the hooks of this tls
+(a new server, an update, or a new setting), and when you run `ttop`, `ttv` or
+`tls setup`. To use the tmux way again, set `proportional = off` in the `[resize]` section
+of the [settings file](#settings).
 
 ### Shell helpers
 
@@ -300,14 +304,40 @@ The comments at the top of `bin/tls` give more detail.
 
 ## Settings
 
+Each setting has a default in tls. The settings file `~/.config/tmux-agents/tls.conf`
+changes them. The installer puts the file there with each setting at its default,
+commented out, and an explanation above each one. To change a setting, remove the `#` in
+front of it and change the value. For example, for a wider ttv bar:
+
+```ini
+[ttv]
+width = 28
+max-width = 34
+```
+
+`tls config` shows the value of each setting that tls uses, and where the value comes from.
+It also shows the lines of the file that tls ignores, and why: a setting that does not
+exist, or a bad value. ttop reads the file when it starts, so start ttop again after a
+change. `tls config --defaults` prints the file with the defaults.
+
+| Section | Settings |
+| --- | --- |
+| `[ttop]` | `layout` (auto, vertical, horizontal: ttop with neither `-v` nor `-h`), `narrow`, `short`, `fit-min-width`, `fit-max-width` |
+| `[ttv]` | `width`, `min-width`, `max-width`, `min-window`, `options` (the ttop options of the bar) |
+| `[preset]` | `layout` (auto, right, bottom), `wide`, `pane-width`, `right-width`, `bottom-min-lines`, `bottom-max-lines` |
+| `[resize]` | `proportional` (on, off) |
+| `[agents]` | `claude`, `commands`, `keep-dead-days` |
+
+Environment variables win over the file:
+
 | Variable | Default | Effect |
 | --- | --- | --- |
+| `TLS_CONFIG` | `~/.config/tmux-agents/tls.conf` | The settings file. |
 | `TLS_STATE_DIR` | `~/.local/state/agent-tls` | The directory for the records. |
-| `TLS_CLAUDE` | `claude` | The command that resumes a Claude Code session. |
-| `TLS_AGENT_COMMANDS` | `claude codex gemini` | Panes that run these commands show as agents before they report. |
-| `TLS_PRESET` | (by the window's shape) | `right` or `bottom`: the layout for `t -p`, `ttop -p` and `tls preset`. |
+| `TLS_CLAUDE` | `claude` | `[agents] claude`: the command that resumes a Claude Code session. |
+| `TLS_AGENT_COMMANDS` | `claude codex gemini` | `[agents] commands`: panes that run these commands show as agents before they report. |
+| `TLS_PRESET` | `auto` | `[preset] layout`: `right` or `bottom` for `t -p`, `ttop -p` and `tls preset`. |
 | `TMUX_CLIENT_CACHE` | `~/.local/share/tmux-clients` | The directory for the copies of old tmux clients. |
-| `@tls-proportional` (a tmux option) | `on` | `off`: when a window changes size, tmux resizes its panes in its own way. |
 
 ## Files
 
@@ -318,6 +348,7 @@ The comments at the top of `bin/tls` give more detail.
 | `bin/ttv` | A short script that runs `tls bar`. |
 | `bin/tls-test` | The self-test. |
 | `shell/tmux-agents.bash` | The bash helpers. |
+| `config/tls.conf` | The settings file, with each setting at its default (`tls config --defaults`). |
 | `config/tmux.conf` | The tmux config of the author (optional). |
 | `docs/interface.md` | The agent status interface. |
 | `install.sh` | The installer. |
