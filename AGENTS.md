@@ -87,7 +87,7 @@ Tell the user about them before you start the installer.
 | --- | --- | --- |
 | `~/.claude/settings.json` | Adds the command `<bin>/tls hook` for nine Claude Code hook events. Makes the file if it does not exist. | `~/.claude/settings.json.bak-tls-<time>` |
 | `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` | Comments out a line `alias tls=...`, because the alias hides the `tls` command. | `<file>.bak-tls-<time>` |
-| The tmux server, if one runs | Adds five hooks at index `[42]`. tmux forgets them when the server stops. | None |
+| The tmux server, if one runs | Adds seven hooks at index `[42]`, and the window options `@tls-base` and `@tls-size` to each window with splits. tmux forgets them when the server stops. | None |
 
 Then run one of these commands:
 
@@ -184,11 +184,12 @@ code, so tell the user to quit it with `q` and start it again.
    setup commented out an `alias tls=...` line, restore it from the comment.
 4. If the user agrees, delete the records in `~/.local/state/agent-tls/` and the copies of
    tmux clients in `~/.local/share/tmux-clients/`.
-5. tmux forgets the five hooks when its server stops. To remove them now, run this loop. It
+5. tmux forgets the seven hooks when its server stops. To remove them now, run this loop. It
    goes to the user's live server, but it removes only the hooks of tls:
 
    ```sh
-   for h in client-attached client-session-changed session-window-changed after-select-pane pane-focus-in; do
+   for h in client-attached client-session-changed session-window-changed after-select-pane pane-focus-in \
+            window-layout-changed window-resized; do
        tmux set-hook -gu "$h[42]"
    done
    ```

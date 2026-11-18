@@ -40,6 +40,9 @@ tmux-agents fixes both problems.
   back in its old session, window and pane, and continues its conversation.
 - **Session control.** `n` opens a new session with a free name. Del deletes a session or an
   agent, after you confirm.
+- **Resize in proportion.** When a window changes size, for example on a different monitor,
+  its panes keep their proportions, and a ttop bar keeps its width. tmux alone takes the
+  same number of columns from each pane, so narrow panes almost go away.
 - **Window presets.** `t -p` opens a new session that is already split for work: two panes
   side by side, and a bar with ttop, on the right of a wide window or at the bottom. `ttv`
   adds a ttop bar on the right of the window you are in, whatever its panes are.
@@ -219,6 +222,24 @@ ttv does nothing in a window of 80 columns or less. It also does nothing in a wi
 already has a bar with ttop, from ttv or from a preset. `ttv WINDOW` adds the bar to a
 different window, for example `ttv =main:1`. ttv works in all shells.
 
+### Window resize
+
+When a window changes size, for example when you go from a 21:9 monitor to a 16:9
+monitor, tmux takes the same number of columns from each pane, until a pane has only 1
+column. So a narrow pane, such as the ttv bar, almost goes away, and a wide pane keeps most
+of its width. tls changes this. After each resize, each split keeps its proportions, and a
+ttop bar keeps its width. A bar from ttv keeps at least 25 columns. When you go back to the
+old size, you get your old layout back exactly.
+
+For example, take panes of 200 and 73 columns and the ttv bar, and make the window go from
+300 to 200 columns. tmux alone makes them 162, 35 and 1 columns. With tls, they become 127,
+46 and 25 columns.
+
+tls keeps the last layout that you made in each window: after a split, a close or a drag.
+It does not keep a layout that tmux made for a new size. tls adds its tmux hooks when an
+agent starts, and when you run `ttop`, `ttv` or `tls setup`. To use the tmux way again, run
+`tmux set -g @tls-proportional off`.
+
 ### Shell helpers
 
 | Shell helper | Action |
@@ -261,6 +282,9 @@ report.
   the record.
 - tls copies the state into tmux pane options. When you select the pane of a green agent, a
   tmux hook makes the dot grey.
+- When you change the layout of a window, a tmux hook keeps it in the window option
+  `@tls-base`. When the window changes size, a second hook runs `tls relayout`, which
+  scales that layout to the new size.
 - A report with `state=finished` gives the last message of the agent. tls reads it, and
   picks `waiting`, `blocked` or `done`. For your own rules, put a Python file
   `tmux-agent-classify` next to `tls`. Its `classify(text)` must return
@@ -283,6 +307,7 @@ The comments at the top of `bin/tls` give more detail.
 | `TLS_AGENT_COMMANDS` | `claude codex gemini` | Panes that run these commands show as agents before they report. |
 | `TLS_PRESET` | (by the window's shape) | `right` or `bottom`: the layout for `t -p`, `ttop -p` and `tls preset`. |
 | `TMUX_CLIENT_CACHE` | `~/.local/share/tmux-clients` | The directory for the copies of old tmux clients. |
+| `@tls-proportional` (a tmux option) | `on` | `off`: when a window changes size, tmux resizes its panes in its own way. |
 
 ## Files
 
@@ -301,7 +326,7 @@ The comments at the top of `bin/tls` give more detail.
 ## Tests
 
 ```sh
-bin/tls-test     # about 140 checks on throwaway tmux servers
+bin/tls-test     # about 150 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux

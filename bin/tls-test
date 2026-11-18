@@ -613,6 +613,56 @@ check "ttv leaves alone a window of 80 columns" \
 check "ttv with no window outside tmux says so" \
   'out=$(env -u TMUX_PANE TLS_TMUX="-L $SRV" "$HERE/ttv" 2>&1); [ $? = 1 ] && [[ $out == *"not in tmux"* ]]'
 for s in tv1 tv2 tv3 tv4; do $T kill-session -t "=$s"; done
+
+# Resize in proportion. tmux takes the same number of columns from each pane,
+# so the ttv bar went down to 1 column. tls's window-resized hook gives the
+# panes their proportions back, and a ttop bar keeps its width. A client in the
+# stand-in terminal changes the window's size, as a move to another monitor does.
+$T new-session -d -s rs -x 300 -y 60 "sleep 600"; $T split-window -d -h -l 99 -t =rs: "sleep 600"
+ttv =rs:
+G0=$(geom rs)
+$TT new-session -d -s rsterm -x 300 -y 61 "env -u TMUX tmux -L $SRV attach -t =rs"
+retry client_on rs
+in_proportion() {  # in_proportion BEFORE: in rs, the bar keeps 25 columns, and the two panes share the rest as in BEFORE (geom)
+  geom rs | awk -v before="$1" -v W="$($T display -p -t =rs: '#{window_width}')" '
+    BEGIN { split(before, b, "\n"); split(b[1], p, " "); a0 = p[2]; split(b[2], p, " "); b0 = p[2] }
+    { w[NR] = $2 }
+    END { room = W - 27; d = w[1] - room * a0 / (a0 + b0); exit !(NR == 3 && w[3] == 25 && w[1] + w[2] == room && d * d < 1) }'
+}
+$TT resize-window -t rsterm -x 200 -y 61
+check "a window gets narrower: its panes keep their proportions, and the ttv bar its 25 columns" 'retry in_proportion "$G0"'
+$TT resize-window -t rsterm -x 300 -y 61
+check "back at the old size, the old layout comes back exactly" 'retry same_geom rs "$G0"'
+$T new-session -d -s rs2 -x 300 -y 60 "sleep 600"
+$T split-window -d -h -l 99 -t =rs2: "sleep 600"; $T split-window -d -v -l 20 -t =rs2:.1 "sleep 600"
+$T switch-client -c "$($T list-clients -t =rs -F '#{client_name}')" -t =rs2
+retry client_on rs2
+rs2_ok() {  # A | (B over C): from 200 | 99, and 39 over 20, at 300x60 to 200x40
+  geom rs2 | awk '{ w[NR] = $2; h[NR] = $3 }
+    END { a = w[1] - 199 * 200 / 299; b = h[2] - 39 * 39 / 59; c = h[3] - 39 * 20 / 59
+          exit !(a * a < 1 && b * b < 1 && c * c < 1 && w[2] == 199 - w[1] && w[3] == w[2] && h[1] == 40) }'
+}
+$TT resize-window -t rsterm -x 200 -y 41
+check "with no bar, in both directions: widths and heights keep their proportions" 'retry rs2_ok'
+$T resize-pane -t =rs2:.0 -x 100
+$TT resize-window -t rsterm -x 300 -y 61
+drag_kept() { geom rs2 | awk 'NR == 1 { d = $2 - 100 * 299 / 199; exit !(d * d < 1) }'; }
+check "a change you make at the new size is what the next resize keeps" 'retry drag_kept'
+$T switch-client -c "$($T list-clients -t =rs2 -F '#{client_name}')" -t =rs
+retry client_on rs
+$T set -g @tls-proportional off
+$TT resize-window -t rsterm -x 200 -y 61
+bar_crushed() { [ "$(geom rs | awk 'END { print $2 }')" -lt 25 ]; }
+check "tmux set -g @tls-proportional off: tmux resizes the panes its own way" 'retry bar_crushed'
+$T set -gu @tls-proportional
+$TT kill-session -t rsterm
+$T new-session -d -s rs3 -x 200 -y 50 "sleep 600"; $T split-window -d -h -t =rs3: "sleep 600"
+$T set -wu -t =rs3: @tls-base; $T set -wu -t =rs3: @tls-size   # as if it was split before tls added its hooks
+$T new-session -d -s rs4 -x 200 -y 50 "sleep 600"
+ttv =rs4:   # adds the hooks again
+check "a window split before tls added its hooks gets its layout of then kept" \
+  '[ "$($T show -wv -t =rs3: @tls-base)" = "$($T display -p -t =rs3: "#{window_layout}")" ] && [ "$($T show -wv -t =rs3: @tls-size)" = 200x50 ]'
+for s in rs rs2 rs3 rs4; do $T kill-session -t "=$s"; done
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,
