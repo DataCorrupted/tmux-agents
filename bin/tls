@@ -382,18 +382,6 @@ def read(path):
         return ""
 
 
-def boot_id():
-    return read("/proc/sys/kernel/random/boot_id").strip()
-
-
-def proc_start(pid):
-    """Start time of PID in clock ticks since boot (field 22 of /proc/PID/stat)."""
-    try:
-        return int(read("/proc/%d/stat" % pid).rsplit(")", 1)[1].split()[19])
-    except (IndexError, ValueError, TypeError):
-        return None
-
-
 def first_line(text, limit):
     for line in str(text or "").splitlines():
         line = " ".join(line.split()).strip(" *#>-")
@@ -418,6 +406,86 @@ def tmux(*args, server=None):
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
+
+
+# ── platform ─────────────────────────────────────────────────────────────────
+# What tls needs from the OS: an ID of this boot, and a process's start time,
+# parent, command name and arguments. Linux answers from /proc. macOS has no
+# /proc, so tls asks its kernel through libSystem: sysctl for the boot and the
+# arguments, proc_pidinfo for the rest. The rest of tls is the same on both.
+
+if sys.platform == "darwin":
+    import ctypes
+    import struct
+
+    LIBC = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    LIBC.sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+    LIBC.sysctlbyname.argtypes = (ctypes.c_char_p, ctypes.c_void_p,
+                                  ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+    LIBC.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+    # struct proc_bsdinfo of <sys/proc_info.h>: 12 uint32 fields (the 5th is the
+    # parent), comm[16], name[32], 5 uint32 fields, nice, start seconds and microseconds
+    BSDINFO = struct.Struct("=12I16s32s5Ii2Q")
+
+    def sysctl(mib, size):
+        """The value of sysctl MIB (a name, or a tuple of numbers) in at most
+        size bytes, or None on failure."""
+        buf, n = ctypes.create_string_buffer(size), ctypes.c_size_t(size)
+        if isinstance(mib, str):
+            failed = LIBC.sysctlbyname(mib.encode(), buf, ctypes.byref(n), None, 0)
+        else:
+            failed = LIBC.sysctl((ctypes.c_int * len(mib))(*mib), len(mib), buf, ctypes.byref(n), None, 0)
+        return None if failed else ctypes.string_at(buf, n.value)
+
+    ARGMAX = int.from_bytes(sysctl("kern.argmax", 4) or b"", sys.byteorder) or 1 << 20
+
+    def bsdinfo(pid):
+        """PID's struct proc_bsdinfo as a tuple, or None if there is no such process."""
+        buf = ctypes.create_string_buffer(BSDINFO.size)
+        # ctypes would wrap a pid out of range around to a different process
+        if isinstance(pid, int) and 0 < pid < 1 << 31 and \
+                LIBC.proc_pidinfo(pid, 3, 0, buf, BSDINFO.size) == BSDINFO.size:  # 3: PROC_PIDTBSDINFO
+            return BSDINFO.unpack(buf.raw)
+        return None
+
+    def boot_id():
+        return (sysctl("kern.bootsessionuuid", 64) or b"").rstrip(b"\0").decode()
+
+    def proc_start(pid):
+        """Start time of PID in microseconds since the epoch."""
+        info = bsdinfo(pid)
+        return info[20] * 1000000 + info[21] if info else None
+
+    def proc_info(pid):
+        """PID's parent (None if PID is gone), command name and arguments."""
+        info = bsdinfo(pid)
+        if not info:
+            return None, "", []
+        # KERN_PROCARGS2: argc, the program's path, NUL padding, the arguments, the environment
+        raw = sysctl((1, 49, pid), ARGMAX) or bytes(4)  # CTL_KERN, KERN_PROCARGS2
+        argc = int.from_bytes(raw[:4], sys.byteorder)
+        args = raw[4:].partition(b"\0")[2].lstrip(b"\0").split(b"\0")[:argc]
+        comm = info[12].split(b"\0")[0]
+        return info[4], comm.decode(errors="replace"), [a.decode(errors="replace") for a in args]
+else:
+    def boot_id():
+        return read("/proc/sys/kernel/random/boot_id").strip()
+
+    def proc_start(pid):
+        """Start time of PID in clock ticks since boot (field 22 of /proc/PID/stat)."""
+        try:
+            return int(read("/proc/%d/stat" % pid).rsplit(")", 1)[1].split()[19])
+        except (IndexError, ValueError, TypeError):
+            return None
+
+    def proc_info(pid):
+        """PID's parent (None if PID is gone), command name and arguments."""
+        try:
+            ppid = int(read("/proc/%d/stat" % pid).rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            ppid = None
+        return ppid, read("/proc/%d/comm" % pid).strip(), read("/proc/%d/cmdline" % pid).split("\0")
 
 
 # ── state store ──────────────────────────────────────────────────────────────
@@ -622,16 +690,12 @@ def agent_pid(name):
     or the program in its first two arguments, has that name. None if none."""
     p = os.getppid()
     for _ in range(8):
-        if not name or p <= 1:
+        if not name or p is None or p <= 1:
             break
-        argv = read("/proc/%d/cmdline" % p).split("\0")[:2]
-        if read("/proc/%d/comm" % p).strip() == name or any(
-                os.path.basename(a) == name or "/" + name in a for a in argv):
+        ppid, comm, argv = proc_info(p)
+        if comm == name or any(os.path.basename(a) == name or "/" + name in a for a in argv[:2]):
             return p
-        try:
-            p = int(read("/proc/%d/stat" % p).rsplit(")", 1)[1].split()[1])
-        except (IndexError, ValueError):
-            break
+        p = ppid
     return None
 
 

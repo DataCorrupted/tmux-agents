@@ -30,7 +30,7 @@ what you saw.
 ## 1. Check the machine
 
 ```sh
-uname -s                            # must print Linux: tls reads /proc
+uname -s                            # Linux, or Darwin (macOS)
 tmux -V                             # 3.0 or newer
 /usr/bin/python3 --version          # 3.7 or newer; tls starts with #!/usr/bin/python3
 bash --version | head -n 1          # the shell helpers need bash
@@ -39,12 +39,13 @@ command -v claude; ls -d ~/.claude  # does the user use Claude Code?
 echo "TMUX=$TMUX"                   # if set, your shell runs inside the user's tmux (rule 1)
 ```
 
-- If `uname -s` prints `Darwin` (macOS), stop. tls works only on Linux.
 - If a tool is not available or is too old, ask the user. Then install it with the package
-  manager, for example `sudo apt-get install tmux python3 git` (Debian, Ubuntu) or
-  `sudo dnf install tmux python3 git` (Fedora, RHEL).
+  manager, for example `sudo apt-get install tmux python3 git` (Debian, Ubuntu),
+  `sudo dnf install tmux python3 git` (Fedora, RHEL) or `brew install tmux` (macOS).
 - If Python 3 is on the machine, but not at `/usr/bin/python3`, stop and tell the user. tls
-  cannot start without it.
+  cannot start without it. On macOS, `/usr/bin/python3` comes with the Xcode Command Line
+  Tools: if it does not run, ask the user to run `xcode-select --install`.
+- The bash of macOS (3.2) is enough for the shell helpers.
 
 ## 2. Get the code
 
@@ -75,6 +76,10 @@ below:
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+On macOS, Terminal and tmux start bash as a login shell, which reads `~/.bash_profile` and
+not `~/.bashrc`. If `~/.bash_profile` does not load `~/.bashrc`, ask the user, and add the
+line `. ~/.bashrc` to `~/.bash_profile`. Then `~/.bashrc` works here and in step 5.
 
 Use the installer. Do not make symlinks to the clone instead, because some dotfile syncers
 do not copy symlinks.
