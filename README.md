@@ -43,6 +43,7 @@ tmux-agents fixes both problems.
   side by side, and a bar with ttop, on the right of a wide window or at the bottom.
 - **Shell helpers for bash.** `t`, `trm` and `tmv` open, kill and rename sessions. They match
   session names exactly. Plain tmux takes `-t foo` to mean `foobar` when there is no `foo`.
+  `t` and `tmv` refuse names that tmux can misread, such as `-p` or `foo.bar`.
 - **Any agent.** Claude Code works out of the box. Other agents report their state with one
   command, `tls report` ([docs/interface.md](docs/interface.md)).
 
@@ -193,6 +194,11 @@ To use the presets each time, add `alias t='t -p'` and `alias tt='ttop -p'` to
 | `tmux-cache-clean` | Delete the copies of old tmux clients that no server needs. |
 | `tmux_autostart [NAME]` | On an interactive terminal outside tmux, attach to session NAME (default `main`). Exit the shell when tmux detaches. |
 
+`t` and `tmv` take only session names of ASCII letters, digits, `_` and `-`, with no `-`
+first. A name with `-` first reads as an option: before `t` knew `-p`, `t -p` made a session
+`-p`. A tmux target reads `.` and `:` as separators, so `t foo.bar` cannot find its own
+session. `trm` takes any name, so it can remove a bad one.
+
 After a tmux upgrade, the new tmux client can fail to attach to the old server. Then `t`
 and `tmux_autostart` attach with a copy of the old tmux binary, which they keep in
 `~/.local/share/tmux-clients`.
@@ -257,7 +263,7 @@ The comments at the top of `bin/tls` give more detail.
 ## Tests
 
 ```sh
-bin/tls-test     # about 100 checks on throwaway tmux servers
+bin/tls-test     # about 120 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux

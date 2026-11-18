@@ -17,15 +17,39 @@
 # Session names always match exactly ("=NAME"). On its own, tmux takes `-t foo`
 # for a session "foobar" when there's no "foo": `t foo` then opened foobar,
 # `trm foo` killed it, and `tmv x foo` said that foo already existed.
+#
+# t and tmv take only names of ASCII letters, digits, _ and -, with no - first.
+# A name with - first reads as an option (an old t made a session "-p" of
+# `t -p`), a tmux target reads . and : as separators, and other symbols break
+# scripts. trm takes any name, so it can remove a bad one.
 
 alias tt='ttop'
+
+# _tmux_name_ok CMD NAME: true if NAME is a good session name; else CMD says why.
+_tmux_name_ok() {
+    local LC_ALL=C   # else [A-Za-z] also takes é, in en_US.UTF-8
+    [[ $2 =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] && return 0
+    echo "$1: bad session name '$2': use only letters, digits, _ and -, and do not start with -" >&2
+    return 1
+}
 
 # t [-p] [NAME]: switch to or attach to session NAME, creating it if needed;
 # with -p, a new session gets the preset layout.
 t() {
-    local preset= w h
-    while [ "$1" = -p ] || [ "$1" = --preset ]; do preset=1; shift; done   # alias t='t -p' adds one
-    local name=${1:-$(command -v tls >/dev/null && tls new-name 2>/dev/null)}
+    local preset= name= arg w h
+    for arg; do
+        case $arg in
+            -p|--preset) preset=1 ;;   # alias t='t -p' can add a second one
+            -*) echo "t: unknown option '$arg'; usage: t [-p] [NAME]" >&2; return 1 ;;
+            *) if [ -n "$name" ]; then echo "t: more than one NAME; usage: t [-p] [NAME]" >&2; return 1; fi
+               name=$arg ;;
+        esac
+    done
+    if [ -n "$name" ]; then
+        _tmux_name_ok t "$name" || return
+    else
+        name=$(command -v tls >/dev/null && tls new-name 2>/dev/null)
+    fi
     if [ -z "$name" ] || ! tmux has-session -t "=$name" 2>/dev/null; then
         if [ -n "$preset" ]; then  # made at the size it gets here, so that showing it resizes nothing
             if [ -n "$TMUX" ]; then
@@ -46,7 +70,7 @@ t() {
     fi
 }
 
-# trm NAME...: kill sessions.
+# trm NAME...: kill sessions. Any name, so that it can remove a bad one.
 trm() {
     local s rc=0
     for s in "$@"; do
@@ -63,6 +87,7 @@ tmv() {
         2) old=$1 new=$2 ;;
         *) echo "Usage: tmv NEW (renames this session) or tmv OLD NEW" >&2; return 1 ;;
     esac
+    _tmux_name_ok tmv "$new" || return
     if [ "$old" = "$new" ]; then
         echo "Already named '$new'"
         return 0

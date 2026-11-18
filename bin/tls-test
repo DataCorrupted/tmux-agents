@@ -386,6 +386,19 @@ lib 'trm pfx' 2>/dev/null
 check "trm leaves alone a session whose name only starts with it" '$T has-session -t =pfxlong'
 lib 'tmv pfxlong pfx' >/dev/null 2>&1
 check "tmv takes a name that only starts another session's name" '$T has-session -t =pfx && no_session pfxlong'
+# Bad names. TMUX puts t on its inside-tmux path, where an old t made a session
+# of any word: `t -p` made "-p". tmux keeps "foo.bar" (older ones make it
+# "foo_bar"), but a target reads the dot as a separator.
+TMUX="$SOCK,1,0" lib 't -x; t "a b"; t foo.bar; t ab cd; tmv pfx -y; tmv pfx "a b"' > "$D/names" 2>&1
+check "t refuses an unknown option or two names; t and tmv refuse a name with symbols or - first" \
+  '[ "$(grep -c "^t: unknown option .-x.\|^t: more than one NAME\|^t: bad session name .a b.\|^t: bad session name .foo.bar.\|^tmv: bad session name .-y.\|^tmv: bad session name .a b." "$D/names")" = 6 ]'
+check "and they make or rename no session" \
+  '$T has-session -t =pfx && ! $T list-sessions -F "#{session_name}" | grep -qxF -e -x -e "a b" -e foo.bar -e foo_bar -e ab -e -y'
+$T new-session -d -s -p "sleep 600"; $T new-session -d -s -q "sleep 600"
+lib 'tmv -p pgood; trm -q' >/dev/null 2>&1
+check "tmv and trm still take a bad old name, to fix or remove its session" \
+  '$T has-session -t =pgood && no_session =-p && no_session =-q'
+$T kill-session -t =pgood
 printf '%s\n' "tmux() { command tmux -L $SRV \"\$@\"; }" ". '$LIB'" "t pf" > "$D/t-outside"
 term "bash --norc --noprofile '$D/t-outside'" >/dev/null
 check "t outside tmux opens the exact session, creating it" 'retry client_on pf && $T has-session -t =pfx'
@@ -457,12 +470,14 @@ check "TLS_PRESET=bottom puts the bar at the bottom of a wide window too, and te
 check "preset leaves alone a window with more than one pane" \
   'out=$(preset =wide: 2>&1); [ $? = 1 ] && [[ $out == *"a preset needs a window with one"* ]] && [ "$(panes_of wide | wc -l)" = 3 ]'
 for s in wide std forced; do $T kill-session -t "=$s"; done
-printf '%s\n' "tls() { '$TLS' \"\$@\"; }" ". '$LIB'" "t -p prez" > "$D/t-preset"
+printf '%s\n' "tls() { '$TLS' \"\$@\"; }" ". '$LIB'" "t -p" > "$D/t-preset"
 $T new-window -d -t beta: "bash --norc --noprofile '$D/t-preset'"
-check "t -p makes a new session in the preset layout, at this window's size, and switches to it" \
-  'retry client_on prez && [ "$(panes_of prez | wc -l)" = 3 ] && side_by_side prez && panes_of prez | grep -qE "^0,32 160x7 0 .*ttop.? -p"'
+check "t -p makes a new session with a free name in the preset layout, at this window's size, and switches to it" \
+  'retry new_client >/dev/null && PZ=$(new_client) && [ "$(panes_of "$PZ" | wc -l)" = 3 ] && side_by_side "$PZ" &&
+   panes_of "$PZ" | grep -qE "^0,32 160x7 0 .*ttop.? -p" && no_session =-p'
+NEW=$(new_client)
 $T switch-client -c "$($T list-clients -F '#{client_name}' | head -1)" -t beta
-$T kill-session -t =prez
+$T kill-session -t "=$NEW"
 TP=$($T new-window -P -F '#{pane_id}' -t beta: "env TLS_STATE_DIR='$D/state' '$HERE/ttop' -p")
 retry shows_in "$TP" "▌1"
 $T send-keys -t "$TP" n
