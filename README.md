@@ -123,6 +123,11 @@ Two options are not in the default install:
 | d | Forget a dead agent: the selected one, or press its key. |
 | q | Quit. |
 
+In ttop inside tmux, bold text shows where you are: the name of the session that the ttop is
+in, and the name of the agent whose pane is active there. When you go into the ttop pane,
+the agent that you came from stays bold. The grey bar is only the selection for Enter and
+the other keys. `*` after a name means that a terminal shows that session.
+
 `tls` prints the same list once, as `ps` does. `tls -h` shows all commands.
 
 ### Vertical layout

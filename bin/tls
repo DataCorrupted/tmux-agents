@@ -87,6 +87,10 @@ R brings back all dead agents · d forgets a dead agent: the selected one, or
 press its key · q quit. In a window of under 12 lines, such as the bottom bar,
 ttop leaves out its blank lines and puts the key hint on the title line.
 
+In ttop inside tmux, bold marks where you are: the name of the session that
+the ttop is in, and the name of the agent whose pane is active there (when
+you go into the ttop, the pane that you came from).
+
 Dots: red blocked · yellow waiting on you · green done, not looked at yet ·
 blue busy (hollow: turn over, background task still running) · grey idle ·
 ? agent with no status yet · x dead (pane closed or machine rebooted).
@@ -980,12 +984,12 @@ def guarded(fn, *args):
 
 PANE_FIELDS = ("socket", "server", "session", "attached", "window_id", "window", "window_name",
                "auto_name", "window_active", "width", "height", "layout", "pane", "index",
-               "active", "cwd", "cmd", "start", "title")
+               "active", "cwd", "cmd", "start", "last", "title")
 PANE_FORMAT = "\t".join(("#{socket_path}", SERVER_ID, "#{session_name}", "#{session_attached}",
                          "#{window_id}", "#{window_index}", "#{window_name}", "#{automatic-rename}",
                          "#{window_active}", "#{window_width}", "#{window_height}", "#{window_layout}",
                          "#{pane_id}", "#{pane_index}", "#{pane_active}", "#{pane_current_path}",
-                         "#{pane_current_command}", "#{pane_start_command}", "#{pane_title}"))
+                         "#{pane_current_command}", "#{pane_start_command}", "#{pane_last}", "#{pane_title}"))
 
 
 def list_panes(server=None):
@@ -1296,6 +1300,31 @@ BLANK = {"key": "", "name": "", "attached": False, "state": "", "age": None, "la
 DEAD = ("dead", "deadsession")
 
 
+def focus_of(panes, here):
+    """(session, pane) where you work, as the ttop in pane here sees it: the
+    session of that ttop, and the active pane of the session's current window,
+    or the pane that was active before, when that is the ttop itself (you
+    went into it). (None, None) if pane here is not in panes."""
+    me = next((p for p in panes if p["pane"] == here), None)
+    if not me:
+        return None, None
+    win = [p for p in panes if p["session"] == me["session"] and p["window_active"] == "1"]
+    act = next((p for p in win if p["active"] == "1"), None)
+    if act and act["pane"] == here:
+        act = next((p for p in win if p.get("last") == "1"), None)
+    return me["session"], act["pane"] if act else None
+
+
+def mark_focus(rows, session, pane):
+    """here on the rows with the name of session, here_pane on the row of the
+    agent in pane: ttop draws those names in bold."""
+    for r in rows:
+        act = r.get("action") or ()
+        if act[:1] == ("open",):
+            r["here"] = bool(session and r["name"] and act[1] == session)
+            r["here_pane"] = bool(pane and act[2] == pane)
+
+
 def build_rows(snap, live=False):
     """Rows to draw, and the hotkeys as {key: row index}. A session with one
     agent is one row; a session with none or several has a row of its own and
@@ -1403,15 +1432,16 @@ def dim(s, color):
 
 
 def paint(segs, width, color):
-    """(text, 256-color, "dim" or None) segments as one line at most width
-    columns wide, cut with an ellipsis. Returns the line and the columns left
-    over. Colors end with 39m or 22m, not 0m, so a selection bar survives them."""
+    """(text, 256-color, "dim", "bold" or None) segments as one line at most
+    width columns wide, cut with an ellipsis. Returns the line and the columns
+    left over. Colors end with 39m or 22m, not 0m, so a selection bar survives them."""
     out, room = [], width
     for text, hue in segs:
         text = fit(text, room)
         room -= sum(map(char_width, text))
         if color and hue is not None and text:
-            text = "\033[2m%s\033[22m" % text if hue == "dim" else "\033[38;5;%dm%s\033[39m" % (hue, text)
+            text = ("\033[2m%s\033[22m" % text if hue == "dim" else "\033[1m%s\033[22m" % text if hue == "bold"
+                    else "\033[38;5;%dm%s\033[39m" % (hue, text))
         out.append(text)
     return "".join(out), room
 
@@ -1482,11 +1512,13 @@ def row_line(r, cols, width, color, live=False, selected=False):
     name_w, status_w, agent_w = cols
     st = r["state"]
     segs = [("%s%s " % ("▌" if selected else " ", r["key"] or " "), None)] if live else []
-    segs.append((pad(fit_middle(r["name"] + ("*" if r["attached"] else ""), name_w), name_w) + " ", None))
+    name = fit_middle(r["name"] + ("*" if r["attached"] else ""), name_w)
+    segs += [(name, "bold" if r.get("here") else None), (" " * (name_w - width_of(name) + 1), None)]
     if st:
         segs.append(("%s %s " % (GLYPH.get(st, " "), pad(state_word(r), status_w)), COLOR.get(st)))
         if agent_w:
-            segs.append((pad(r["label"], agent_w) + " ", None))
+            label = fit(r["label"], agent_w)
+            segs += [(label, "bold" if r.get("here_pane") else None), (" " * (agent_w - width_of(label) + 1), None)]
         segs += [("%4s  " % ago(r["age"]), None), (r["detail"], None)]
     text, room = paint(segs, width, color)
     return BAR + text + " " * room if selected and color else text.rstrip()
@@ -1536,13 +1568,16 @@ def row_lines_v(r, cols, width, color, live=False, selected=False, most=1):
     if r["name"]:
         key = (r["key"] or " ") + " " if live else ""
         name = r["name"] + ("*" if r["attached"] else "")
-        out.append(line([(mark + key + fit_middle(name, width - width_of(mark + key)), None)]))
+        out.append(line([(mark + key, None), (fit_middle(name, width - width_of(mark + key)),
+                                               "bold" if r.get("here") else None)]))
     if r["state"]:
         st = r["state"]
         word = " " + pad(state_word(r), status_w) if status_w else ""
         segs = [(mark + " ", None), (GLYPH.get(st, " ") + word + " ", COLOR.get(st))]
         if name_w:
-            segs.append((pad(r["label"], name_w) + (" " if show_age else ""), None))
+            label = fit(r["label"], name_w)
+            segs += [(label, "bold" if r.get("here_pane") else None),
+                     (" " * (name_w - width_of(label)) + (" " if show_age else ""), None)]
         if show_age:
             segs.append(("%3s" % ago(r["age"]), None))
         out.append(line(segs))
@@ -2242,7 +2277,8 @@ def one_shot(vertical=False):
     return 0
 
 
-HINT = "↑↓ select · enter or 1-9 open/resume · n new session · del delete · R resume all dead · q quit · * attached"
+HINT = ("↑↓ select · enter or 1-9 open/resume · n new session · del delete · R resume all dead · q quit"
+        " · * attached · bold: you are here")
 HINT_V = "↑↓ enter n del R q"  # the vertical layout's, for a narrow window
 DEL = ("\x7f", "\x08", "\033[3~")  # Backspace (the Mac delete key), ^H, forward Delete
 NAV = {"\033[A": "up", "\033OA": "up", "\033[B": "down", "\033OB": "down",
@@ -2350,6 +2386,7 @@ def ttop(vertical=None, preset=False, fit_pane=False):
             if time.time() >= refresh_at:
                 snap = snapshot()
                 rows, hotkeys = build_rows(snap, live=True)
+                mark_focus(rows, *focus_of(snap["panes"], here))
                 picks = [i for i, r in enumerate(rows) if r.get("action")]
                 refresh_at = time.time() + 1
                 if picks:  # the same agent if it's still listed, else the nearest row

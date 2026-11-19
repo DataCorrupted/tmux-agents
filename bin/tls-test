@@ -17,7 +17,7 @@ retry() { for _ in $(seq 25); do "$@" && return 0; sleep 0.2; done; return 1; }
 field() { /usr/bin/python3 -IS -c "import json,sys; r=json.load(open(sys.argv[1])); print(r$1)" "$D/state/$SID.json" 2>/dev/null; }
 cleanup() {
   $T kill-server 2>/dev/null; $TT kill-server 2>/dev/null
-  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE8:-} ${FAKE9:-} 2>/dev/null
+  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE8:-} ${FAKE9:-} ${FAKE10:-} 2>/dev/null
   rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SRV}_term"
   rm -rf "$D"
 }
@@ -770,6 +770,32 @@ CV=$($TT new-session -d -P -F '#{pane_id}' -s confv -x 160 -y 20 \
 check "layout = vertical in tls.conf: plain ttop is vertical in a window where auto is horizontal" 'retry hint_v "$CV"'
 $TT kill-session -t confv
 rm -f "$TLS_CONFIG"
+
+# Bold marks where you are: in a ttop inside tmux, the name of its session,
+# and of the agent whose pane is active there, or was, when you go into ttop.
+$T new-session -d -s fo-here -x 200 -y 30 "sleep 600"
+FA=$($T display -p -t =fo-here: '#{pane_id}')
+FB=$($T split-window -d -h -P -F '#{pane_id}' -t "$FA" "sleep 600")
+FT=$($T split-window -d -h -P -F '#{pane_id}' -t "$FB" "env TLS_STATE_DIR='$D/state' '$HERE/ttop' -h")
+sleep 600 & FAKE10=$!
+TMUX="$SOCK,1,0" TMUX_PANE="$FA" "$TLS" report id=focus-a agent=codex pid=$FAKE10 state=idle name=agent-a
+TMUX="$SOCK,1,0" TMUX_PANE="$FB" "$TLS" report id=focus-b agent=codex pid=$FAKE10 state=idle name=agent-b
+bold_in() { $T capture-pane -ep -t "$FT" | grep -aqE $'\e''\[1m('$'\e''\[[0-9;]*m)*'"$1"; }   # bold_in TEXT: ttop shows TEXT in bold
+only_bold() { bold_in "$1" && ! bold_in "$2"; }
+check "ttop shows in bold the session it is in, and the agent whose pane is active" 'retry only_bold agent-a agent-b && bold_in fo-here'
+$T select-pane -t "$FB"
+check "the bold goes with the active pane" 'retry only_bold agent-b agent-a'
+$T select-pane -t "$FT"; sleep 2   # 2 refreshes: the screen from before can pass too
+check "in ttop itself, the pane you came from stays bold" 'only_bold agent-b agent-a'
+"$TLS" forget focus-a; "$TLS" forget focus-b; kill "$FAKE10"; $T kill-session -t =fo-here
+bold_py() {  # bold names in the vertical lines and the horizontal line of a row where you are: "sessions agents"
+  /usr/bin/python3 -ISB -c 'import importlib.machinery as m, importlib.util as u, sys
+l = m.SourceFileLoader("tls", sys.argv[1]); t = u.module_from_spec(u.spec_from_loader("tls", l)); l.exec_module(t)
+r = dict(t.BLANK, kind="session", name="sess-x", key="1", state="idle", label="agent-x", here=True, here_pane=True)
+text = "\n".join(t.row_lines_v(r, (4, 7, True), 30, True, True) + [t.row_line(r, (8, 4, 7), 80, True, True)])
+print(text.count("\033[1msess-x"), text.count("\033[1magent-x"))' "$TLS"
+}
+check "the vertical and the horizontal layout both draw the names of where you are in bold" '[ "$(bold_py)" = "2 2" ]'
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,
