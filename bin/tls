@@ -76,16 +76,17 @@ into two panes side by side. Then the bar's ttop fits the bar to the list
 bar. When tmux does not know the cell size in pixels, tls takes a cell as
 twice as high as wide. A rebuilt session gets ttop back in its bar.
 
-ttop keys: ↑/↓ select a row (Home/End, PgUp/PgDn jump) · Enter opens the
-selected session or agent pane (switch inside tmux, attach outside; detaching
-comes back here), brings back a dead agent's session, or marks a green agent
-outside tmux (VS Code) seen · 1-9 open a session at its most urgent agent or
-bring back a dead one · n opens a new session (adjective-noun name, current
-directory: like `t`; with -p in the preset layout, like `t -p`) · Del or
-Backspace deletes the selected session, agent or dead agent (Enter confirms) ·
-R brings back all dead agents · d forgets a dead agent: the selected one, or
-press its key · q quit. In a window of under 12 lines, such as the bottom bar,
-ttop leaves out its blank lines and puts the key hint on the title line.
+ttop keys: ↑/↓ select a row, and go round from the last row to the first and
+back (Home/End, PgUp/PgDn jump) · Enter opens the selected session or agent
+pane (switch inside tmux, attach outside; detaching comes back here), brings
+back a dead agent's session, or marks a green agent outside tmux (VS Code)
+seen · 1-9 open a session at its most urgent agent or bring back a dead one ·
+n opens a new session (adjective-noun name, current directory: like `t`; with
+-p in the preset layout, like `t -p`) · Del or Backspace deletes the selected
+session, agent or dead agent (Enter confirms) · R brings back all dead agents
+· d forgets a dead agent: the selected one, or press its key · q quit. In a
+window of under 12 lines, such as the bottom bar, ttop leaves out its blank
+lines and puts the key hint on the title line.
 
 In ttop inside tmux, bold marks where you are: the name of the session that
 the ttop is in, and the name of the agent whose pane is active there (when
@@ -2458,7 +2459,9 @@ def ttop(vertical=None, preset=False, fit_pane=False):
                         page = max(1, (room - 1) // (3 if vert else 1))  # in rows; vertical: ~3 lines each
                         step = {"up": -1, "down": 1, "pgup": -page, "pgdn": page,
                                 "home": -len(picks), "end": len(picks)}[NAV[k]]
-                        j = picks.index(sel) + step if sel in picks else 0
+                        i = picks.index(sel) if sel in picks else 0
+                        # An arrow at an end goes round to the other end; a page or Home/End stops there.
+                        j = (i + step) % len(picks) if NAV[k] in ("up", "down") else i + step
                         sel = picks[max(0, min(len(picks) - 1, j))]
                         sel_id = rows[sel]["id"]
                     continue

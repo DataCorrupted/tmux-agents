@@ -114,7 +114,7 @@ Two options are not in the default install:
 
 | ttop key | Action |
 | --- | --- |
-| ↑ ↓ Home End PgUp PgDn | Select a row. |
+| ↑ ↓ Home End PgUp PgDn | Select a row. ↓ on the last row goes round to the first row, and ↑ on the first row to the last. |
 | Enter | Open the selected session or agent, or bring back a dead agent. |
 | 1-9, then a-z without d, n, q and r | Do the same for the row with that key. A session opens at its most urgent agent. |
 | n | Open a new session in the current directory, with a free adjective-noun name. With `ttop -p`, give it the preset layout. |

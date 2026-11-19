@@ -162,6 +162,17 @@ $TT send-keys -t "$P" Down
 check "down arrow moves the highlight" 'retry shows "$P" "▌2.*beta .*done" && ! shows "$P" "▌1"'
 $TT send-keys -t "$P" Up
 check "up arrow moves it back" 'retry shows "$P" "▌1 *alpha"'
+sel_line() { $TT capture-pane -p -t "$P" | grep "▌" | cut -c1-20; }   # the selected row's key and name
+$TT send-keys -t "$P" End
+retry eval '! shows "$P" "▌1"'
+LAST=$(sel_line)
+$TT send-keys -t "$P" Home
+retry shows "$P" "▌1 *alpha"
+$TT send-keys -t "$P" Up
+same_sel() { [ "$(sel_line)" = "$LAST" ]; }
+check "up on the first row goes round to the last row" 'retry same_sel'
+$TT send-keys -t "$P" Down
+check "and down on the last row goes round to the first" 'retry shows "$P" "▌1 *alpha"'
 $TT send-keys -t "$P" Down Enter
 check "enter attaches to the selected session" 'retry client_on beta'
 check "opening a green agent marks it seen" 'retry state_is $SID2 idle'
