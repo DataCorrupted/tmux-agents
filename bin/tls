@@ -39,8 +39,8 @@ and the default behaviors below; each one has a default in tls, and an
 environment variable wins over the file. `tls config` shows them all.
 
 Columns: session, dot and status, agent name, age, summary. A session with one
-agent is one row. A session with no agent or several has a row of its own, and
-its agents get a row each under it, from the status column on. An agent's name
+agent is one line. A session with no agent or several has a line of its own,
+and its agents get a line each under it, from the status column on. An agent's name
 is the one its user gave it (in Claude Code: /rename), else the agent's title
 for the conversation, else its kind, such as codex; the summary is what it last
 said or asked. Dead agents group by the session they ran in. Narrow windows
@@ -76,17 +76,21 @@ into two panes side by side. Then the bar's ttop fits the bar to the list
 bar. When tmux does not know the cell size in pixels, tls takes a cell as
 twice as high as wide. A rebuilt session gets ttop back in its bar.
 
-ttop keys: ↑/↓ select a row, and go round from the last row to the first and
-back (Home/End, PgUp/PgDn jump) · Enter opens the selected session or agent
-pane (switch inside tmux, attach outside; detaching comes back here), brings
-back a dead agent's session, or marks a green agent outside tmux (VS Code)
-seen · 1-9 open a session at its most urgent agent or bring back a dead one ·
-n opens a new session (adjective-noun name, current directory: like `t`; with
--p in the preset layout, like `t -p`) · Del or Backspace deletes the selected
-session, agent or dead agent (Enter confirms) · R brings back all dead agents
-· d forgets a dead agent: the selected one, or press its key · q quit. In a
-window of under 12 lines, such as the bottom bar, ttop leaves out its blank
-lines and puts the key hint on the title line.
+ttop keys: ↑/↓ select a session or an agent, and go round from the last row
+to the first and back (Home/End, PgUp/PgDn jump); a line with a session and
+its only agent has two parts to select · Enter on an agent opens its pane.
+Enter on a session opens the session at the ttop bar of its current window,
+if it has one, and that ttop selects the session: then ↓ and Enter take you
+on to the next session. Inside tmux, Enter switches; outside, it attaches,
+and detaching comes back here. Enter also brings back a dead agent's
+session, or marks a green agent outside tmux (VS Code) seen · 1-9 open a
+session at its most urgent agent or bring back a dead one · . selects the
+session of this ttop · n opens a new session (adjective-noun name, current
+directory: like `t`; with -p in the preset layout, like `t -p`) · Del or
+Backspace deletes the selected session, agent or dead agent (Enter confirms)
+· R brings back all dead agents · d forgets a dead agent: the selected one,
+or press its key · q quit. In a window of under 12 lines, such as the bottom
+bar, ttop leaves out its blank lines and puts the key hint on the title line.
 
 In ttop inside tmux, bold marks where you are: the name of the session that
 the ttop is in, and the name of the agent whose pane is active there (when
@@ -1327,34 +1331,30 @@ def mark_focus(rows, session, pane):
 
 
 def build_rows(snap, live=False):
-    """Rows to draw, and the hotkeys as {key: row index}. A session with one
-    agent is one row; a session with none or several has a row of its own and
-    a row per agent under it. Dead agents group the same way, by the session
-    they ran in. Each row has an id (to find it again after a refresh) and a
-    kind: session, agent, outside, dead or deadsession. A row with an action
-    is selectable in ttop: ("open", session, pane, record) shows the session
-    (at that pane), ("seen", record) marks an agent outside tmux seen, and
-    ("restore", records) brings dead agents back. A session's key picks its
-    most urgent agent."""
+    """Rows to draw, and the hotkeys as {key: row index}. A session has a row
+    of its own and a row per agent under it. The row of a session's only agent
+    is inline: the horizontal layout draws it on the line of its session.
+    Dead agents group by the session they ran in; a group of one is one row.
+    Each row has an id (to find it again after a refresh) and a kind:
+    session, agent, outside, dead or deadsession. A row with an action is
+    selectable in ttop: ("open", session, pane, record) shows the session at
+    that pane, or, with no pane, at its ttop; ("seen", record) marks an agent
+    outside tmux seen, and ("restore", records) brings dead agents back. A
+    session's key picks its most urgent agent."""
     rows, hotkeys, keys = [], {}, iter(KEYS)
     for s in snap["sessions"]:
         agents, key, head = s["agents"], next(keys, ""), len(rows)
-        if len(agents) != 1:
-            rows.append(dict(BLANK, id=("session", s["name"]), kind="session", key=key, name=s["name"],
-                             attached=s["attached"], action=("open", s["name"], None, None)))
+        rows.append(dict(BLANK, id=("session", s["name"]), kind="session", key=key, name=s["name"],
+                         attached=s["attached"], action=("open", s["name"], None, None)))
         for a in agents:
-            rec = a["rec"]
-            row = dict(BLANK, id=("pane", a["pane"]), kind="agent", state=(rec or {}).get("state") or "?",
-                       age=(rec or {}).get("since"), label=label(rec), detail=detail(rec),
-                       where="%s %s.%s" % (s["name"], a["window"], a["index"]),
-                       action=("open", s["name"], a["pane"], rec))
-            if len(agents) == 1:  # the session's own row
-                row.update(kind="session", key=key, name=s["name"], attached=s["attached"],
-                           label=label(rec, s["name"]))
-            rows.append(row)
+            rec, one = a["rec"], len(agents) == 1
+            rows.append(dict(BLANK, id=("pane", a["pane"]), kind="agent", state=(rec or {}).get("state") or "?",
+                             age=(rec or {}).get("since"), label=label(rec, s["name"] if one else ""),
+                             detail=detail(rec), inline=one, where="%s %s.%s" % (s["name"], a["window"], a["index"]),
+                             action=("open", s["name"], a["pane"], rec)))
         if key:
             urgency = [URGENCY.get((a["rec"] or {}).get("state") or "?", 9) for a in agents]
-            hotkeys[key] = head + (1 + urgency.index(min(urgency)) if len(agents) > 1 else 0)
+            hotkeys[key] = head + (1 + urgency.index(min(urgency)) if agents else 0)
     if snap["outside"]:
         rows.append({"section": "outside tmux" + (" · enter marks a green one seen" if live else "")})
         for rec in snap["outside"]:
@@ -1506,23 +1506,33 @@ def columns(rows, width, live):
     return w["name"], status, w["agent"]
 
 
-def row_line(r, cols, width, color, live=False, selected=False):
+def row_line(r, cols, width, color, live=False, selected=False, inline=None, inline_selected=False):
     """[ttop: selection mark, key] session name, then for an agent its dot and
-    status, name, age and summary. A selected row comes back with the bar
-    still on, for the caller's \\033[K to extend."""
+    status, name, age and summary: those of row r, or of row inline, the
+    inline row of r's only agent, which shares the line. A selected row comes
+    back with the bar still on, for the caller's \\033[K to extend. On a
+    shared line, the bar is under the selected part only: the session's name,
+    or the agent, which then has the selection mark just before its dot."""
     name_w, status_w, agent_w = cols
-    st = r["state"]
+    a = inline or r  # the row of the agent columns
+    st = a["state"]
     segs = [("%s%s " % ("▌" if selected else " ", r["key"] or " "), None)] if live else []
     name = fit_middle(r["name"] + ("*" if r["attached"] else ""), name_w)
-    segs += [(name, "bold" if r.get("here") else None), (" " * (name_w - width_of(name) + 1), None)]
+    segs += [(name, "bold" if r.get("here") else None), (" " * (name_w - width_of(name)), None)]
+    head, room = paint(segs, width, color)
+    segs = [("▌" if inline_selected else " ", None)]
     if st:
-        segs.append(("%s %s " % (GLYPH.get(st, " "), pad(state_word(r), status_w)), COLOR.get(st)))
+        segs.append(("%s %s " % (GLYPH.get(st, " "), pad(state_word(a), status_w)), COLOR.get(st)))
         if agent_w:
-            label = fit(r["label"], agent_w)
-            segs += [(label, "bold" if r.get("here_pane") else None), (" " * (agent_w - width_of(label) + 1), None)]
-        segs += [("%4s  " % ago(r["age"]), None), (r["detail"], None)]
-    text, room = paint(segs, width, color)
-    return BAR + text + " " * room if selected and color else text.rstrip()
+            label = fit(a["label"], agent_w)
+            segs += [(label, "bold" if a.get("here_pane") else None), (" " * (agent_w - width_of(label) + 1), None)]
+        segs += [("%4s  " % ago(a["age"]), None), (a["detail"], None)]
+    tail, room = paint(segs, room, color)
+    if not color or not (selected or inline_selected):
+        return (head + tail).rstrip()
+    if inline_selected:
+        return head + BAR + tail + " " * room
+    return BAR + head + (tail + " " * room if inline is None else "\033[49m" + tail.rstrip())
 
 
 def columns_v(rows, width, live):
@@ -1611,8 +1621,12 @@ def body_lines(rows, width, color, live=False, sel=None, vertical=False, height=
                 head = re.split(r" \(| · ", r["section"])[0] if vertical else r["section"]
                 lines += ["", dim(fit("── %s ──" % head, width), color)]
                 continue
+            if r.get("inline") and not vertical:  # on the line of its session, the row before
+                at[i] = at[i - 1]
+                continue
+            inline = rows[i + 1] if not vertical and rows[i + 1:i + 2] and rows[i + 1].get("inline") else None
             new = (row_lines_v(r, cols[i], width, color, live, i == sel, most) if vertical
-                   else [row_line(r, cols, width, color, live, i == sel)])
+                   else [row_line(r, cols, width, color, live, i == sel, inline, bool(inline) and i + 1 == sel)])
             at[i] = (len(lines), len(lines) + len(new) - 1)
             lines += new
         return lines or [fit("  (no tmux sessions)", width)], at
@@ -1671,12 +1685,34 @@ def inside_tmux():
     return bool(os.environ.get("TMUX")) and not TMUX_ARGS
 
 
-def open_session(name, pane, rec, leave=None, enter=None):
-    """Show session name, at pane if given. Returns an error message or None."""
+HERE_KEY = "."  # ttop selects the row of its own session; another ttop sends it when it brings you there
+
+
+def ttop_pane(session):
+    """(pane, typable) of a ttop in the current window of session: the first
+    live pane that tmux started with ttop, such as a ttv, tth or preset bar.
+    typable: a key sent there reaches that ttop only, as no synchronize-panes
+    copies it to the other panes. (None, False) if none."""
+    out = tmux("list-panes", "-t", "=%s:" % session, "-F",
+               "#{pane_dead}\t#{synchronize-panes}\t#{pane_id}\t#{pane_start_command}") or ""
+    for f in (l.split("\t", 3) for l in out.splitlines()):
+        if len(f) == 4 and f[0] != "1" and is_ttop(start_command(f[3])):
+            return f[2], f[1] != "1"
+    return None, False
+
+
+def open_session(name, pane, rec, leave=None, enter=None, bar=False):
+    """Show session name, at pane if given; else, with bar, at the ttop in
+    its current window, if it has one, which then selects the session's row
+    (HERE_KEY). Returns an error message or None."""
     if rec:
         mark_seen(rec)
     if pane:
         tmux("select-window", "-t", pane, ";", "select-pane", "-t", pane)
+    elif bar:
+        top, typable = ttop_pane(name)
+        if top:
+            tmux(*(("send-keys", "-t", top, HERE_KEY, ";") if typable else ()), "select-pane", "-t", top)
     if inside_tmux():
         return None if tmux("switch-client", "-t", "=" + name) is not None else "couldn't switch to " + name
     if leave:
@@ -2339,7 +2375,7 @@ def fit_size(rows, vertical, size, win, cell):
     if vertical:  # + 1: ttop stays off the last column
         return max(conf("ttop", "fit-min-width"),
                    min(natural_width(rows) + 1, conf("ttop", "fit-max-width"), win[0] // 3)), lines
-    body = sum(2 if "section" in r else 1 for r in rows) or 1  # as many lines as body_lines draws
+    body = sum(2 if "section" in r else 0 if r.get("inline") else 1 for r in rows) or 1  # as body_lines draws
     want = 1 + body if 1 + body < conf("ttop", "short") else 4 + body  # a bar has only its title line besides
     return cols, max(2, min(want, win[1] // 3, cols * cell[0] // cell[1]))
 
@@ -2454,6 +2490,11 @@ def ttop(vertical=None, preset=False, fit_pane=False):
                     continue
                 if k == "q":
                     return 0
+                if k == HERE_KEY:  # now, not at the next refresh: the keys after it move on from there
+                    if here:
+                        sel_id = ("session", focus_of(snap["panes"], here)[0])
+                        sel = next((i for i in picks if rows[i]["id"] == sel_id), sel)
+                    continue
                 if k in NAV:
                     if picks:
                         page = max(1, (room - 1) // (3 if vert else 1))  # in rows; vertical: ~3 lines each
@@ -2505,7 +2546,7 @@ def ttop(vertical=None, preset=False, fit_pane=False):
                     msg_until = time.time() + 5
                     continue
                 if act[0] == "open":
-                    err = open_session(*act[1:], leave=leave, enter=enter)
+                    err = open_session(*act[1:], leave=leave, enter=enter, bar=True)
                 else:  # restore
                     name, pane = restore(act[1])
                     err = open_session(name, pane, None, leave, enter) if name else pane

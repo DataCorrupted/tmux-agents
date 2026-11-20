@@ -160,7 +160,11 @@ check "ttop starts on the first session, highlighted" \
   'retry shows "$P" "▌1 *alpha" && $TT capture-pane -ep -t "$P" | grep "alpha" | grep -q "48;5;237"'
 $TT send-keys -t "$P" Down
 check "down arrow moves the highlight" 'retry shows "$P" "▌2.*beta .*done" && ! shows "$P" "▌1"'
-$TT send-keys -t "$P" Up
+# beta and its only agent share a line, but are two rows to select.
+$TT send-keys -t "$P" Down
+check "down again selects beta's agent: the mark moves to the agent's dot" \
+  'retry shows "$P" "^ 2 beta *▌● done"'
+$TT send-keys -t "$P" Up Up
 check "up arrow moves it back" 'retry shows "$P" "▌1 *alpha"'
 sel_line() { $TT capture-pane -p -t "$P" | grep "▌" | cut -c1-20; }   # the selected row's key and name
 $TT send-keys -t "$P" End
@@ -173,11 +177,11 @@ same_sel() { [ "$(sel_line)" = "$LAST" ]; }
 check "up on the first row goes round to the last row" 'retry same_sel'
 $TT send-keys -t "$P" Down
 check "and down on the last row goes round to the first" 'retry shows "$P" "▌1 *alpha"'
-$TT send-keys -t "$P" Down Enter
+$TT send-keys -t "$P" Down Down Enter
 check "enter attaches to the selected session" 'retry client_on beta'
 check "opening a green agent marks it seen" 'retry state_is $SID2 idle'
 $T detach-client -s beta
-check "detaching comes back to ttop, same row selected" 'retry shows "$P" "▌2.*beta .*idle"'
+check "detaching comes back to ttop, same row selected" 'retry shows "$P" "^ 2 beta *▌○ idle"'
 # n creates a session named like `t` names one, in ttop's directory, and opens it.
 new_client() { $T list-clients -F '#{client_session}' | grep -Ex '[a-z]+-[a-z]+' | head -1 | grep .; }
 $TT send-keys -t "$P" n
@@ -194,14 +198,51 @@ check "q quits ttop" 'retry exited_ok "$P"'
 # or Enter has to switch that client.
 $TT new-window -d -t term: "env -u TMUX tmux -L $SRV attach -t alpha"
 retry client_on alpha
-TP=$($T new-window -P -F '#{pane_id}' -t alpha: "env TLS_STATE_DIR='$D/state' '$HERE/ttop'")
+TP=$($T new-window -P -F '#{pane_id}' -t alpha: "TLS_STATE_DIR='$D/state' '$HERE/ttop'")
 retry shows_in "$TP" "▌1 *alpha"
+# beta gets a ttop bar, as from ttv; its ttop starts on the first row.
+BAR=$($T split-window -d -h -l 30 -P -F '#{pane_id}' -t "$PANE2" "'$HERE/ttop' -v")
+retry shows_in "$BAR" "▌1 *alpha"
+switch_to() { $T switch-client -c "$($T list-clients -F '#{client_name}')" -t "$1"; }
+active_is() { [ "$($T display -p -t "=$1:" '#{pane_id}')" = "$2" ]; }   # active_is SESSION PANE
 $T send-keys -t "$TP" 2
 check "a session's key switches the attached client" 'retry client_on beta'
-$T switch-client -c "$($T list-clients -F '#{client_name}')" -t alpha
+check "to the session's most urgent agent, not to its ttop bar" 'active_is beta "$PANE2"'
+switch_to alpha
 check "client back on alpha" 'client_on alpha'
 $T send-keys -t "$TP" Home Down Enter
 check "enter switches the attached client to the selected session" 'retry client_on beta'
+check "enter on a session goes to the ttop bar of its window" 'active_is beta "$BAR"'
+check "and that ttop selects the session" 'retry shows_in "$BAR" "▌2 beta"'
+$T send-keys -t "$BAR" Down
+check "down there selects beta's agent, a row of its own" 'retry shows_in "$BAR" "▌ ○ idle"'
+$T send-keys -t "$BAR" Down Enter
+check "down goes round to alpha, and enter there switches back to alpha" 'retry client_on alpha'
+check "where alpha's ttop selects alpha" 'retry shows_in "$TP" "▌1 *alpha"'
+$T send-keys -t "$TP" Home Down Down Enter
+check "enter on an agent goes to the agent's pane" 'retry client_on beta && active_is beta "$PANE2"'
+# With synchronize-panes on, a key sent to one pane goes to all of them: then
+# no key goes, and the bar keeps its selection.
+CAT=$($T split-window -d -v -P -F '#{pane_id}' -t "$PANE2")
+$T send-keys -t "$BAR" End
+retry shows_in "$BAR" "▌ ○ idle"
+$T set -w -t "$BAR" synchronize-panes on
+switch_to alpha
+$T send-keys -t "$TP" Home Down Enter
+check "with synchronize-panes on, enter on a session still goes to the bar" \
+  'retry client_on beta && active_is beta "$BAR"'
+sleep 0.5
+check "but sends no key, which the other panes would get too" '! shows_in "$CAT" "[.]" && shows_in "$BAR" "▌ ○ idle"'
+$T set -w -t "$BAR" synchronize-panes off
+# A bar whose ttop quit, kept by remain-on-exit, gets no focus.
+$T set -w -t "$BAR" remain-on-exit on
+$T send-keys -t "$BAR" q
+retry eval '[ "$($T display -p -t "$BAR" "#{pane_dead}")" = 1 ]'
+$T select-pane -t "$PANE2"
+switch_to alpha
+$T send-keys -t "$TP" Home Down Enter
+check "a dead ttop pane gets no focus" 'retry client_on beta && active_is beta "$PANE2"'
+$T kill-pane -t "$BAR"; $T kill-pane -t "$CAT"; $T set -w -t "$PANE2" -u remain-on-exit
 $T send-keys -t "$TP" n
 check "n switches the attached client to a new session" 'retry new_client >/dev/null'
 NEW=$(new_client)
@@ -807,6 +848,28 @@ text = "\n".join(t.row_lines_v(r, (4, 7, True), 30, True, True) + [t.row_line(r,
 print(text.count("\033[1msess-x"), text.count("\033[1magent-x"))' "$TLS"
 }
 check "the vertical and the horizontal layout both draw the names of where you are in bold" '[ "$(bold_py)" = "2 2" ]'
+parts_py() {  # a session with one agent: two rows, one line in the horizontal layout; "ok" or what went wrong
+  /usr/bin/python3 -ISB -c 'import importlib.machinery as m, importlib.util as u, sys, re
+l = m.SourceFileLoader("tls", sys.argv[1]); t = u.module_from_spec(u.spec_from_loader("tls", l)); l.exec_module(t)
+snap = {"sessions": [{"name": "empty", "attached": False, "agents": []},
+                     {"name": "solo", "attached": False, "agents": [{"pane": "%9", "window": "0", "index": "0",
+                      "rec": {"state": "done", "agent": "claude"}}]}], "outside": [], "gone": [], "panes": []}
+rows, keys = t.build_rows(snap, live=True)
+def lines(sel, vertical):  # the bar as [ and its end as ], no other colors
+    out = t.body_lines(rows, 60, True, live=True, sel=sel, vertical=vertical)[0]
+    return [re.sub("\033\\[[0-9;]*m", "", s.replace(t.BAR, "[").replace("\033[49m", "]")).rstrip() for s in out]
+h1, h2, v1, v2 = lines(1, False), lines(2, False), lines(1, True), lines(2, True)
+want = {"rows": [r["kind"] for r in rows] == ["session", "session", "agent"], "keys": keys == {"1": 0, "2": 2},
+        "h: two lines": len(h1) == len(h2) == 2, "h: bar under the name": re.match(r"\[▌2 solo *\] ●", h1[1]),
+        "h: bar from the agent": re.match(r" 2 solo *\[▌● done", h2[1]),
+        "h: none on the line before": h1[0] == h2[0] == " 1 empty",
+        "v: bar under the name line": v1[1].startswith("[▌2 solo") and not v1[2].startswith("["),
+        "v: bar under the agent line": not v2[1].startswith("[") and v2[2].startswith("[▌ ● done"),
+        "fit: two lines": t.fit_size(rows, False, (60, 20), (60, 60), (1, 2))[1] == 3}
+bad = [k for k, v in want.items() if not v]
+print("ok" if not bad else "%s: %r" % (bad, (h1, h2, v1, v2)))' "$TLS"
+}
+check "a session with one agent: two rows to select, on one line in the horizontal layout" '[ "$(parts_py)" = ok ]'
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,

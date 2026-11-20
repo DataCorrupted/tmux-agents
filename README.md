@@ -35,7 +35,8 @@ tmux-agents fixes both problems.
   `-f`, ttop sizes its tmux pane to the list.
 - **One key to go there.** Press the key of a row, or select the row and press Enter. Inside
   tmux, ttop switches your terminal to that session. Outside tmux, ttop attaches to it.
-  Detach to come back to ttop.
+  Detach to come back to ttop. Enter on a session takes you to the ttop bar there, with
+  that session selected, so ↓ and Enter take you through your sessions one by one.
 - **Restore after a reboot.** ttop lists the agents that died. Press R, and each agent comes
   back in its old session, window and pane, and continues its conversation.
 - **Session control.** `n` opens a new session with a free name. Del deletes a session or an
@@ -114,9 +115,10 @@ Two options are not in the default install:
 
 | ttop key | Action |
 | --- | --- |
-| ↑ ↓ Home End PgUp PgDn | Select a row. ↓ on the last row goes round to the first row, and ↑ on the first row to the last. |
-| Enter | Open the selected session or agent, or bring back a dead agent. |
+| ↑ ↓ Home End PgUp PgDn | Select a session or an agent. A session and its only agent share a line, but you select them one at a time. ↓ on the last row goes round to the first row, and ↑ on the first row to the last. |
+| Enter | On an agent: open its pane. On a session: open the session at the ttop bar of its current window, if it has one. That ttop then selects the session, so ↓ and Enter take you on to the next session. On a dead agent: bring it back. |
 | 1-9, then a-z without d, n, q and r | Do the same for the row with that key. A session opens at its most urgent agent. |
+| . | Select the session that this ttop is in. A ttop sends this key to the bar when Enter takes you to a session. |
 | n | Open a new session in the current directory, with a free adjective-noun name. With `ttop -p`, give it the preset layout. |
 | Del or Backspace | Delete the selected session (kill-session), agent (kill-pane) or dead agent (forget it). Enter confirms. |
 | R | Bring back all dead agents. |
