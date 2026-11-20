@@ -201,7 +201,7 @@ retry client_on alpha
 TP=$($T new-window -P -F '#{pane_id}' -t alpha: "TLS_STATE_DIR='$D/state' '$HERE/ttop'")
 retry shows_in "$TP" "▌1 *alpha"
 # beta gets a ttop bar, as from ttv; its ttop starts on the first row.
-BAR=$($T split-window -d -h -l 30 -P -F '#{pane_id}' -t "$PANE2" "'$HERE/ttop' -v")
+BAR=$($T split-window -d -h -l 25 -P -F '#{pane_id}' -t "$PANE2" "'$HERE/ttop' -v")
 retry shows_in "$BAR" "▌1 *alpha"
 switch_to() { $T switch-client -c "$($T list-clients -F '#{client_name}')" -t "$1"; }
 active_is() { [ "$($T display -p -t "=$1:" '#{pane_id}')" = "$2" ]; }   # active_is SESSION PANE
@@ -699,7 +699,7 @@ squeezed_v() {  # squeezed_v SESSION BEFORE: each pane of BEFORE (geom) kept its
 }
 nested_v() { $T display -p -t "=$1:" '#{window_layout}' | grep -qE '^[0-9a-f]{4},[0-9]+x[0-9]+,0,0\[[0-9]+x[0-9]+,0,0\['; }
 ttops_in() { $T list-panes -t "=$1:" -F '#{pane_start_command}' | grep -c ttop; }
-$T new-session -d -s th1 -x 120 -y 61 "sleep 600"; $T split-window -d -v -t =th1: "sleep 600"
+$T new-session -d -s th1 -x 120 -y 59 "sleep 600"; $T split-window -d -v -t =th1: "sleep 600"
 G=$(geom th1)
 tth =th1:
 check "tth: a bar of 10 lines with ttop -h at the bottom, as wide as the window; the panes give up height in proportion" \
@@ -721,13 +721,13 @@ $T kill-session -t =th5
 $T new-session -d -s th4 -x 120 -y 29 "sleep 600"
 check "tth leaves alone a window of 29 lines" \
   'out=$(tth =th4: 2>&1); [ $? = 1 ] && [[ $out == *"29 lines high"* ]] && [ "$(geom th4 | wc -l)" = 1 ]'
-$TT new-session -d -s thterm -x 120 -y 62 "env -u TMUX tmux -L $SRV attach -t =th1"
+$TT new-session -d -s thterm -x 120 -y 60 "env -u TMUX tmux -L $SRV attach -t =th1"
 retry client_on th1
 bar_h() { [ "$($T list-panes -t =th1: -F '#{pane_height}' | tail -1)" = "$1" ]; }
 $TT resize-window -t thterm -x 120 -y 82
-check "a window gets taller: the tth bar grows with it, to 12 lines at most" 'retry bar_h 12'
+check "a window gets taller than wide (cells of 1 x 2): the tth bar gets 12 lines" 'retry bar_h 12'
 $TT resize-window -t thterm -x 120 -y 42
-check "a window gets shorter: the tth bar keeps 10 lines at least" 'retry bar_h 10'
+check "and back to wider than tall: 10 lines again" 'retry bar_h 10'
 $TT kill-session -t thterm
 for s in th1 th2 th4; do $T kill-session -t "=$s"; done
 
@@ -737,6 +737,7 @@ for s in th1 th2 th4; do $T kill-session -t "=$s"; done
 # stand-in terminal changes the window's size, as a move to another monitor does.
 $T new-session -d -s rs -x 300 -y 60 "sleep 600"; $T split-window -d -h -l 99 -t =rs: "sleep 600"
 ttv =rs:
+check "ttv in a wide window (300 x 60 cells of 1 x 2: 2.5 to 1): a bar of 30 columns" '[ "$(geom rs | awk "END { print \$2 }")" = 30 ]'
 G0=$(geom rs)
 $TT new-session -d -s rsterm -x 300 -y 61 "env -u TMUX tmux -L $SRV attach -t =rs"
 retry client_on rs
@@ -748,11 +749,11 @@ in_proportion() {  # in_proportion BEFORE BAR: in rs, the bar has BAR columns, a
     END { room = W - bar - 2; d = w[1] - room * a0 / (a0 + b0); exit !(NR == 3 && w[3] == bar && w[1] + w[2] == room && d * d < 1) }'
 }
 $TT resize-window -t rsterm -x 200 -y 61
-check "a window gets narrower: its panes keep their proportions, and the ttv bar 25 columns at least" 'retry in_proportion "$G0" 25'
+check "a window gets narrower, not wide now: its panes keep their proportions, and the ttv bar gets 25 columns" 'retry in_proportion "$G0" 25'
 $TT resize-window -t rsterm -x 300 -y 61
 check "back at the old size, the old layout comes back exactly" 'retry same_geom rs "$G0"'
 $TT resize-window -t rsterm -x 400 -y 61
-check "a window gets wider: the ttv bar grows with it, to 30 columns at most" 'retry in_proportion "$G0" 30'
+check "a window gets wider, wide again: the ttv bar gets 30 columns, no more" 'retry in_proportion "$G0" 30'
 $TT resize-window -t rsterm -x 300 -y 61
 retry same_geom rs "$G0"
 $T new-session -d -s rs2 -x 300 -y 60 "sleep 600"
@@ -787,16 +788,95 @@ ttv =rs4:   # adds the hooks again
 check "a window split before tls added its hooks gets its layout of then kept" \
   '[ "$($T show -wv -t =rs3: @tls-base)" = "$($T display -p -t =rs3: "#{window_layout}")" ] && [ "$($T show -wv -t =rs3: @tls-size)" = 200x50 ]'
 for s in rs rs2 rs3 rs4; do $T kill-session -t "=$s"; done
+
+# Bars keep their size: when you switch to a pane, window or session, a ttv
+# or tth bar that lost its size, as after a drag, gets it back, and the other
+# panes share the change in proportion. (tmux runs no hook for a select-pane
+# of the pane that is active already.)
+shared() {  # shared SESSION BEFORE FIELD BAR: the last pane is BAR along FIELD of geom (2 width, 3 height), and
+            # the other panes share the rest in proportion to BEFORE (geom), to the cell; BEFORE through ENVIRON
+  geom "$1" | BEFORE="$2" awk -v f="$3" -v bar="$4" '
+    BEGIN { n = split(ENVIRON["BEFORE"], b, "\n"); for (i = 1; i <= n; i++) { split(b[i], g, " "); old[i] = g[f]; if (i < n) sum += g[f] }
+            room = sum + old[n] - bar }
+    { now[NR] = $f }
+    END { if (NR != n || now[n] != bar) exit 1
+          for (i = 1; i < n; i++) { d = now[i] - room * old[i] / sum; if (d * d >= 1) exit 1 }
+          exit 0 }'
+}
+widths() { geom "$1" | awk '{ printf "%s ", $2 }'; }
+widths_are() { [ "$(widths "$1")" = "$2" ]; }
+$T new-session -d -s kb -x 160 -y 40 "sleep 600"; $T split-window -d -h -t =kb: "sleep 600"
+ttv =kb:
+KB=$($T list-panes -t =kb: -F '#{pane_id}' | tail -1)
+$T resize-pane -t "$KB" -x 35
+G=$(geom kb)
+$T select-pane -t =kb:.1
+check "a switch to a pane gives a ttv bar dragged to 35 columns its 25 back, shared in proportion" \
+  '[[ $G == *" 35 40" ]] && retry shared kb "$G" 2 25'
+$T new-session -d -s kh -x 120 -y 40 "sleep 600"; $T split-window -d -v -t =kh: "sleep 600"
+tth =kh:
+$T resize-pane -t "$($T list-panes -t =kh: -F '#{pane_id}' | tail -1)" -y 15
+G=$(geom kh)
+$T select-pane -t =kh:.1
+check "the same for a tth bar dragged to 15 lines: 10 lines again" '[[ $G == *" 120 15" ]] && retry shared kh "$G" 3 10'
+# A switch to a window, an attach, and a switch to a session do the same.
+SET=$(widths kb)
+drag_kb() { $T resize-pane -t "$KB" -x 35; DRAGGED=$(widths kb); }
+$T new-window -d -t =kb: "sleep 600"
+drag_kb; $T select-window -t =kb:1; $T select-window -t =kb:0
+check "a switch to the window" '[ "$DRAGGED" != "$SET" ] && retry widths_are kb "$SET"'
+drag_kb
+$TT new-session -d -s kbterm -x 160 -y 41 "env -u TMUX tmux -L $SRV attach -t =kb"
+check "an attach to the session" '[ "$DRAGGED" != "$SET" ] && retry widths_are kb "$SET"'
+$T new-session -d -s kb2 -x 160 -y 40 "sleep 600"
+KBC=$($T list-clients -t =kb -F '#{client_name}')
+$T switch-client -c "$KBC" -t =kb2; retry client_on kb2
+drag_kb; $T switch-client -c "$KBC" -t =kb
+check "a switch to the session" '[ "$DRAGGED" != "$SET" ] && retry widths_are kb "$SET"'
+# A bar at its size: no new layout. A hook of the test counts select-layout.
+$T set-hook -g 'after-select-layout[44]' "run-shell 'echo x >> $D/layouts'"
+$T select-pane -t =kb:.0; $T select-pane -t =kb:.1; sleep 1
+check "a switch where the bar has its size makes no new layout" '[ ! -e "$D/layouts" ] && widths_are kb "$SET"'
+$T set-hook -gu 'after-select-layout[44]'
+printf '[resize]\nkeep-bars = off\n' > "$TLS_CONFIG"
+drag_kb; $T select-pane -t =kb:.0; sleep 1
+check "keep-bars = off in tls.conf: a drag stays, also before tls takes its hooks away" \
+  '[ "$(widths kb)" = "$DRAGGED" ] && [ "$DRAGGED" != "$SET" ]'
+$T new-session -d -s kb3 -x 160 -y 40 "sleep 600"
+ttv =kb3:   # adds the hooks again, now without the ones at [43]
+check "and then tls takes its hooks at [43] away" '! $T show-hooks -g "after-select-pane[43]" | grep -qF "$TLS bars"'
+rm -f "$TLS_CONFIG"
+$TT kill-session -t kbterm
+for s in kb kb2 kb3 kh; do $T kill-session -t "=$s"; done
+bars_py() {  # the ttop panes that are ttv or tth bars, and their sizes; "ok" or what went wrong
+  /usr/bin/python3 -ISB -c 'import importlib.machinery as m, importlib.util as u, sys
+l = m.SourceFileLoader("tls", sys.argv[1]); t = u.module_from_spec(u.spec_from_loader("tls", l)); l.exec_module(t)
+t.cell_size = lambda server=None: (1, 2)   # no tmux here
+right = lambda w, cmd: [(0, 0, 0, w - 26, 40, "sleep 600"), (1, w - 25, 0, 25, 40, cmd)]
+bottom = lambda w, h, cmd: [(0, 0, 0, w, h - 11, "sleep 600"), (1, 0, h - 10, w, 10, cmd)]
+corner = [(0, 0, 0, 80, 40, "sleep 600"), (1, 81, 0, 79, 30, "sleep 600"), (2, 81, 31, 79, 9, "/bin/ttop -h")]
+cases = {"right, 160 x 40": (t.bar_targets(160, 40, right(160, "/bin/ttop -v")), {1: ("w", 25)}),
+         "right, wide: 300 x 40": (t.bar_targets(300, 40, right(300, "/bin/ttop -v")), {1: ("w", 30)}),
+         "right, with -f": (t.bar_targets(160, 40, right(160, "/bin/ttop -v -f")), {1: None}),
+         "bottom, 120 x 40": (t.bar_targets(120, 40, bottom(120, 40, "ttop -h")), {1: ("h", 10)}),
+         "bottom, taller than wide: 60 x 40": (t.bar_targets(60, 40, bottom(60, 40, "ttop -h")), {1: ("h", 12)}),
+         "in a corner": (t.bar_targets(160, 40, corner), {2: None})}
+bad = ["%s: %r" % (k, got) for k, (got, want) in cases.items() if got != want]
+print("ok" if not bad else "; ".join(bad))' "$TLS"
+}
+check "bar sizes: ttv 25 columns, 30 in a wide window; tth 10 lines, 12 in a window taller than wide; -f or a corner keeps its size" \
+  '[ "$(bars_py)" = ok ]'
 # The hooks come back by themselves: an agent's report finds that the tmux
 # server lacks them (as after an update of tls, or a new server) and adds them.
 for h in client-attached client-session-changed session-window-changed after-select-pane pane-focus-in \
          window-layout-changed window-resized; do $T set-hook -gu "$h[42]"; done
+for h in client-attached client-session-changed session-window-changed after-select-pane; do $T set-hook -gu "$h[43]"; done
 $T set -gu @tls-hooks
 $T new-session -d -s mk "sleep 600"
 TMUX="$SOCK,1,0" TMUX_PANE="$($T display -p -t =mk: '#{pane_id}')" "$TLS" report id=mark-0001 agent=codex pid=$$ state=busy
 check "an agent's report adds the hooks again to a tmux server that lacks them" \
   '$T show-hooks -gw | grep -q "^window-resized\[42\] .*relayout" && [ "$($T show-hooks -g | grep -cF "$TLS seen")" = 4 ] &&
-   [ -n "$($T show -gv @tls-hooks)" ]'
+   [ "$($T show-hooks -g | grep -cF "$TLS bars")" = 4 ] && [ -n "$($T show -gv @tls-hooks)" ]'
 "$TLS" forget mark-0001; $T kill-session -t =mk
 
 # Settings: defaults in tls, the settings file over them, an environment
@@ -809,10 +889,10 @@ ttv =cf:
 check "a setting in tls.conf changes the default: a ttv bar of 28 columns" \
   '[ "$($T list-panes -t =cf: -F "#{pane_width}" | tail -1)" = 28 ]'
 $T kill-session -t =cf
-printf '[ttv]\nwidth = wide\nmax-width = 34  # a comment\ncolour = red\n[preset]\nlayout = right\n' > "$TLS_CONFIG"
+printf '[ttv]\nwidth = wide\nwide-width = 34  # a comment\ncolour = red\n[preset]\nlayout = right\n' > "$TLS_CONFIG"
 TLS_PRESET=bottom "$TLS" config > "$D/config.out"
 check "tls config shows the value of each setting, where it comes from, and the lines that tls ignores" \
-  'grep -qx "width = 25" "$D/config.out" && grep -qx "max-width = 34  # from tls.conf \[ttv\]" "$D/config.out" &&
+  'grep -qx "width = 25" "$D/config.out" && grep -qx "wide-width = 34  # from tls.conf \[ttv\]" "$D/config.out" &&
    grep -qx "# ignored: tls.conf \[ttv\]: width = wide: use a whole number" "$D/config.out" &&
    grep -qx "# ignored: tls.conf \[ttv\]: no setting colour" "$D/config.out"'
 check "an environment variable wins over tls.conf" 'grep -qx "layout = bottom  # from TLS_PRESET" "$D/config.out"'

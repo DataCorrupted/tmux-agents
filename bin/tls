@@ -7,15 +7,17 @@
                       -v vertical, -h horizontal, neither: by the window's
                       shape; -p: n makes its new sessions in the preset layout;
                       -f: ttop fits its tmux pane to the list
-  ttv [WINDOW]        add a bar with ttop -v, 25 columns wide and as high as
-                      the window, on the right of this tmux window (or
-                      WINDOW) if it is 81 columns wide or more; the panes there
-                      give up room in proportion to their widths. A window
-                      with a ttv bar gets the bar back at 25 columns, and a
-                      bar at the bottom moves to the right (= tls bar right)
-  tth [WINDOW]        the same with ttop -h, 10 lines high and as wide as the
-                      window, at its bottom, if it is 30 lines high or more:
-                      for a screen that is taller than wide (= tls bar bottom)
+  ttv [WINDOW]        add a bar with ttop -v, 25 columns wide (30 in a wide
+                      window) and as high as the window, on the right of this
+                      tmux window (or WINDOW) if it is 81 columns wide or
+                      more; the panes there give up room in proportion to
+                      their widths. A window with a ttv bar gets the bar back
+                      at its width, and a bar at the bottom moves to the
+                      right (= tls bar right)
+  tth [WINDOW]        the same with ttop -h, 10 lines high (12 in a window
+                      taller than wide) and as wide as the window, at its
+                      bottom, if it is 30 lines high or more: for a screen
+                      that is taller than wide (= tls bar bottom)
   tls config [--defaults]
                       the settings that tls uses, and the lines of the
                       settings file that it ignores; --defaults: the settings
@@ -33,6 +35,10 @@
   tls hook [claude]   the Claude Code adapter: a hook event on stdin becomes a
                       report (never prints)
   tls seen PANE       tmux hook: you looked at PANE, so its green dot turns grey
+  tls relayout WINDOW tmux hook: WINDOW changed size, so its panes get their
+                      proportions back
+  tls bars WINDOW     tmux hook: you switched to WINDOW, so its ttv or tth bar
+                      gets its size back
 
 Settings: ~/.config/tmux-agents/tls.conf (or TLS_CONFIG) changes the numbers
 and the default behaviors below; each one has a default in tls, and an
@@ -62,10 +68,16 @@ window at most. Horizontal: as high as the list and its title, 2 lines to a
 third of the window. The preset bars use it.
 
 Resize: when a window changes size, its panes keep their proportions, and a
-ttop bar keeps its size; a ttv bar changes too, but stays 25 to 30 columns
-wide, and a tth bar 10 to 12 lines high. Back at the old size, the old layout comes back. tmux alone takes the
-same number of columns from each pane, so narrow panes go down to 1 column.
-To stop it: proportional = off in the [resize] section of the settings file.
+ttop bar keeps its size. A ttv bar gets its width: 25 columns, or 30 in a
+wide window (2.25:1 in pixels or wider, such as on a 21:9 monitor). A tth bar
+gets its height: 10 lines, or 12 in a window taller than wide. Back at the
+old size, the old layout comes back. tmux alone takes the same number of
+columns from each pane, so narrow panes go down to 1 column. To stop it:
+proportional = off in the [resize] section of the settings file.
+
+Bars keep their size: when you switch to a pane, window or session, a ttv or
+tth bar there that lost its size, as after a drag, gets it back, and the
+other panes share the change in proportion. To stop it: keep-bars = off.
 
 Presets (t -p, ttop -p, tls preset): a wide window, such as on a 21:9 monitor
 (2.25:1 in pixels or wider, with room for two 80-column panes), gets a bar of
@@ -143,12 +155,20 @@ this file.
 # for a new size, which is not the size in @tls-size, and not the one that tls
 # applied (@tls-applied). window-resized runs `tls relayout`, which scales
 # @tls-base to the new size: each split keeps its proportions, and a ttop bar
-# keeps its size along its split; a ttv bar (without -f) changes in proportion
-# too, within [ttv] min-width and max-width. Back at the old size, the old
-# layout comes back exactly. [resize] proportional = off stops it. The hooks
-# come with a mark, @tls-hooks: when an agent's state changes and the mark of
-# its tmux server is not the one of this tls (a new server, an update, a new
-# setting), tls adds its hooks again.
+# keeps its size along its split; a ttv or tth bar (without -f, along the
+# whole right or bottom edge) gets the size for the new shape of the window
+# (bar_sizes). Back at the old size, the old layout comes back exactly.
+# [resize] proportional = off stops it.
+#
+# Bars keep their size. At [43], four of the hooks above (not pane-focus-in,
+# which each click into the terminal fires) run `tls bars` when the window
+# has a pane that runs ttop: a ttv or tth bar that lost its size gets it
+# back, in a layout that tls scales the same way. window-layout-changed then
+# keeps that layout as one that you made. [resize] keep-bars = off stops it.
+#
+# The hooks come with a mark, @tls-hooks: when an agent's state changes and
+# the mark of its tmux server is not the one of this tls (a new server, an
+# update, a new setting), tls adds its hooks again.
 #
 # An agent is dead when its process is gone (PID plus start time) or the boot ID
 # changed. A deliberate quit (/exit, /clear, logout) deletes the record; a kill
@@ -178,7 +198,7 @@ this file.
 #
 # Uninstall: delete the `tls hook` entries from ~/.claude/settings.json and the
 # files, and restore the alias from its comment in ~/.bashrc if setup left one.
-# tmux drops the [42] hooks when its server restarts.
+# tmux drops the [42] and [43] hooks when its server restarts.
 import json
 import os
 import re
@@ -221,20 +241,18 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
      "In a window with fewer lines than this, ttop has no blank lines, and its key hint is on the title line."),
     ("ttop", "fit-min-width", 16, int, "ttop -f: the fewest columns of a vertical pane."),
     ("ttop", "fit-max-width", 40, int, "ttop -f: the most columns of a vertical pane. It also gets a third of the window at most."),
-    ("ttv", "width", 25, int, "The width of the bar that ttv adds, in columns."),
-    ("ttv", "min-width", 25, int,
-     "When the window changes size, the bar changes in proportion, but it keeps this many columns at least."),
-    ("ttv", "max-width", 30, int, "When the window changes size, the bar gets this many columns at most."),
+    ("ttv", "width", 25, int,
+     "The width of the bar, in columns: when ttv adds it, when the window changes size, and when you switch to a pane there."),
+    ("ttv", "wide-width", 30, int, "The width of the bar in a wide window (see [preset] wide)."),
     ("ttv", "min-window", 81, int, "ttv adds a bar only to a window at least this many columns wide."),
     ("ttv", "options", "-v", "ttop",
-     "The ttop options of the bar. With -f, ttop fits the bar to the list, and min-width and max-width do not apply."),
-    ("tth", "height", 10, int, "The height of the bar that tth adds, in lines."),
-    ("tth", "min-height", 10, int,
-     "When the window changes size, the bar changes in proportion, but it keeps this many lines at least."),
-    ("tth", "max-height", 12, int, "When the window changes size, the bar gets this many lines at most."),
+     "The ttop options of the bar. With -f, ttop fits the bar to the list: width and wide-width apply only when ttv adds it."),
+    ("tth", "height", 10, int,
+     "The height of the bar, in lines: when tth adds it, when the window changes size, and when you switch to a pane there."),
+    ("tth", "tall-height", 12, int, "The height of the bar in a window that is taller than wide, in pixels."),
     ("tth", "min-window", 30, int, "tth adds a bar only to a window at least this many lines high."),
     ("tth", "options", "-h", "ttop",
-     "The ttop options of the bar. With -f, ttop fits the bar to the list, and min-height and max-height do not apply."),
+     "The ttop options of the bar. With -f, ttop fits the bar to the list: height and tall-height apply only when tth adds it."),
     ("preset", "layout", "auto", ("auto", "right", "bottom"),
      "Where t -p, ttop -p and tls preset put the bar. auto: on the right of a wide window, else at the bottom."),
     ("preset", "wide", 2.25, float,
@@ -247,6 +265,9 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
     ("resize", "proportional", "on", ("on", "off"),
      "on: when a window changes size, its panes keep their proportions, and a ttop bar keeps its size "
      "(ttv and tth bars: see [ttv] and [tth]). off: tmux takes the same number of columns from each pane."),
+    ("resize", "keep-bars", "on", ("on", "off"),
+     "on: when you switch to a pane, window or session, a ttv or tth bar there that lost its size, "
+     "as after a drag, gets it back, and the other panes share the change in proportion."),
     ("agents", "claude", "claude", str, "The command that resumes a Claude Code session, as: claude --resume ID."),
     ("agents", "commands", "claude codex gemini", "words",
      "A pane that runs one of these commands shows as an agent before the agent reports."),
@@ -254,8 +275,7 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
 )
 SETTING_ENV = {"TLS_PRESET": ("preset", "layout"), "TLS_CLAUDE": ("agents", "claude"),
                "TLS_AGENT_COMMANDS": ("agents", "commands")}
-SETTING_PAIRS = ((("ttop", "fit-min-width"), ("ttop", "fit-max-width")), (("ttv", "min-width"), ("ttv", "max-width")),
-                 (("tth", "min-height"), ("tth", "max-height")),
+SETTING_PAIRS = ((("ttop", "fit-min-width"), ("ttop", "fit-max-width")),
                  (("preset", "bottom-min-lines"), ("preset", "bottom-max-lines")))
 _CONF = None  # (values, sources, problems), when a setting is first needed
 
@@ -387,6 +407,7 @@ HOOK_EVENTS = ("PermissionRequest", "SessionStart", "UserPromptSubmit", "PostToo
 HOOK_MATCHER = {"PreToolUse": "AskUserQuestion|ExitPlanMode"}
 SEEN_HOOKS = ("client-attached", "client-session-changed", "session-window-changed",
               "after-select-pane", "pane-focus-in")
+BAR_HOOKS = SEEN_HOOKS[:4]  # you switch to a pane; not pane-focus-in, which each click into the terminal fires
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -612,15 +633,21 @@ KEEP_LAYOUT = ('if -F "#{&&:#{!=:#{window_layout},#{@tls-applied}},#{||:#{==:#{@
 
 
 def tmux_hooks():
-    """The tmux hooks of tls, as (name, command): `tls seen` when you look at
-    a green agent's pane, and with [resize] proportional on, the two that keep
-    the proportions of the panes when a window changes size."""
+    """The tmux hooks of tls, as (name[index], command): at [42], `tls seen`
+    when you look at a green agent's pane, and with [resize] proportional on,
+    the two that keep the proportions of the panes when a window changes
+    size; at [43], with [resize] keep-bars on, `tls bars` when you switch to
+    a pane, window or session, if the window has a pane that runs ttop."""
     run = 'if -F "#{==:#{@agent-state},done}" { run-shell -b "%s seen #{pane_id}" }' % shlex.quote(SELF)
-    hooks = [(name, run) for name in SEEN_HOOKS]
+    hooks = [(name + "[42]", run) for name in SEEN_HOOKS]
     if conf("resize", "proportional") == "on":
-        hooks += [("window-layout-changed", KEEP_LAYOUT),
-                  ("window-resized", 'if -F "#{&&:#{@tls-base},#{>:#{window_panes},1}}" '
-                                     '{ run-shell -b "%s relayout #{window_id}" }' % shlex.quote(SELF))]
+        hooks += [("window-layout-changed[42]", KEEP_LAYOUT),
+                  ("window-resized[42]", 'if -F "#{&&:#{@tls-base},#{>:#{window_panes},1}}" '
+                                         '{ run-shell -b "%s relayout #{window_id}" }' % shlex.quote(SELF))]
+    if conf("resize", "keep-bars") == "on":
+        bars = ('if -F "#{&&:#{>:#{window_panes},1},#{P:#{?#{m:*ttop*,#{pane_start_command}},1,}}}" '
+                '{ run-shell -b "%s bars #{window_id}" }' % shlex.quote(SELF))
+        hooks += [(name + "[43]", bars) for name in BAR_HOOKS]
     return hooks
 
 
@@ -632,15 +659,18 @@ def hooks_mark():
 
 
 def register_tmux_hooks(server=None):
-    """Add the hooks of tls (tmux_hooks) to the tmux server, at index [42],
-    which keeps them apart from your own hooks; with proportional off, take
-    the resize hooks away. Idempotent. A window with splits that has no kept
-    layout yet gets its layout of now."""
+    """Add the hooks of tls (tmux_hooks) to the tmux server, at index [42]
+    and [43], which keeps them apart from your own hooks; with proportional
+    or keep-bars off, take those hooks away. Idempotent. A window with splits
+    that has no kept layout yet gets its layout of now."""
     args = []
     for name, cmd in tmux_hooks():
-        args += [";", "set-hook", "-g", name + "[42]", cmd]
+        args += [";", "set-hook", "-g", name, cmd]
     if conf("resize", "proportional") == "off":
         args += [";", "set-hook", "-gu", "window-layout-changed[42]", ";", "set-hook", "-gu", "window-resized[42]"]
+    if conf("resize", "keep-bars") == "off":
+        for name in BAR_HOOKS:
+            args += [";", "set-hook", "-gu", name + "[43]"]
     if tmux(*args[1:], ";", "set", "-g", "@tls-hooks", hooks_mark(), server=server) is None:
         return False
     out = tmux("list-windows", "-a", "-F", "#{window_id}\t#{window_panes}\t#{@tls-size}\t"
@@ -2007,12 +2037,21 @@ def window_size():
     return size.columns, size.lines
 
 
-def cell_size():
+def cell_size(server=None):
     """A cell's width and height in pixels, if tmux knows them, else 1 and 2."""
-    cell = (tmux("display", "-p", "#{client_cell_width} #{client_cell_height}") or "").split()
+    cell = (tmux("display", "-p", "#{client_cell_width} #{client_cell_height}", server=server) or "").split()
     if len(cell) == 2 and all(n.isdigit() and n != "0" for n in cell):
         return int(cell[0]), int(cell[1])
     return 1, 2
+
+
+def bar_sizes(w, h, cell):
+    """(columns, lines) of a ttv and a tth bar in a window of w x h cells of
+    cell pixels: [ttv] wide-width in a wide window ([preset] wide), else
+    width; [tth] tall-height in a window taller than wide, else height."""
+    cw, ch = cell
+    return (conf("ttv", "wide-width") if w * cw >= conf("preset", "wide") * h * ch else conf("ttv", "width"),
+            conf("tth", "tall-height") if h * ch > w * cw else conf("tth", "height"))
 
 
 def nested_right(w, h, a, b, bar, cols):
@@ -2074,13 +2113,12 @@ def apply_preset(target):
 
 def add_bar(target, side="right"):
     """ttv (side right) and tth (side bottom): add a bar with ttop, along the
-    right edge of window target and [ttv] width columns wide, or along its
-    bottom edge and [tth] height lines high. tmux takes the room from all the
-    panes, in proportion to their sizes. A window that has such a bar already
-    gets it back at its size; a bar on the other side moves here. Returns an
-    error message or None."""
+    right edge of window target, or along its bottom edge, at its size there
+    (bar_sizes). tmux takes the room from all the panes, in proportion to
+    their sizes. A window that has such a bar already gets it back at its
+    size; a bar on the other side moves here. Returns an error message or None."""
     right = side == "right"
-    sec, size = ("ttv", conf("ttv", "width")) if right else ("tth", conf("tth", "height"))
+    sec = "ttv" if right else "tth"
     out = tmux("list-panes", "-t", target, "-F", "\t".join((
         "#{window_width}", "#{window_height}", "#{pane_id}", "#{pane_left}", "#{pane_top}", "#{pane_width}",
         "#{pane_height}", "#{pane_start_command}")))
@@ -2088,6 +2126,7 @@ def add_bar(target, side="right"):
     if not panes or any(len(p) != 8 for p in panes) or not all(n.isdigit() for n in panes[0][:2]):
         return "no tmux window %s" % target
     w, h = map(int, panes[0][:2])
+    size = bar_sizes(w, h, cell_size())[0 if right else 1]
     bars = {}  # where: (pane, has -f, its width or height now), for the panes that run ttop
     for p in panes:
         cmd = start_command(p[7])
@@ -2216,21 +2255,23 @@ def share(total, weights, mins):
 
 def scale_layout(c, w, h, bars, x=0, y=0):
     """Layout tree c resized to w x h at x, y: the cells of each split share
-    its room in proportion to their old sizes. A ttop bar (bars: pane number
-    to whether it has -f) keeps its size along its split while the other cells
-    have room, but a bar without -f, such as ttv's or tth's, changes in
-    proportion too, within [ttv] min-width and max-width in a row, or [tth]
-    min-height and max-height in a column. None if the panes do not fit."""
+    its room in proportion to their old sizes. A pane in bars, a ttop bar,
+    keeps a size along its split while the other cells have room: bars maps
+    its number to None, for the size it has, or to ("w", columns) or ("h",
+    lines), the size of a ttv or tth bar along a split of that way (bar_targets).
+    None if the panes do not fit."""
     out = dict(c, w=w, h=h, x=x, y=y)
     if "pane" in c:
         return out
     wide, kids = c["kind"] == "{", c["cells"]
-    room = (w if wide else h) - (len(kids) - 1)
-    ratio = room / ((c["w"] if wide else c["h"]) - (len(kids) - 1))
-    dim, (low, high) = ("w", "h")[not wide], ((conf("ttv", "min-width"), conf("ttv", "max-width")) if wide
-                                              else (conf("tth", "min-height"), conf("tth", "max-height")))
-    keep = [None if k.get("pane") not in bars else k[dim] if bars[k["pane"]]
-            else max(low, min(high, int(k[dim] * ratio + 0.5))) for k in kids]
+    room, dim = (w if wide else h) - (len(kids) - 1), ("w", "h")[not wide]
+
+    def kept(k):  # the size that cell k keeps along this split; None: it gets a share of the room
+        if k.get("pane") not in bars:
+            return None
+        bar = bars[k["pane"]]
+        return bar[1] if bar and bar[0] == dim else k[dim]
+    keep = [kept(k) for k in kids]
     mins = [min_size(k, wide) for k in kids]
     flex = [i for i, n in enumerate(keep) if n is None]
     if not flex or sum(n for n in keep if n) + sum(mins[i] for i in flex) > room:
@@ -2251,33 +2292,88 @@ def scale_layout(c, w, h, bars, x=0, y=0):
     return out
 
 
+LAYOUT_FIELDS = ("#{window_width}", "#{window_height}", "#{window_zoomed_flag}", "#{window_layout}", "#{@tls-base}",
+                 "#{pane_id}", "#{pane_left}", "#{pane_top}", "#{pane_width}", "#{pane_height}", "#{pane_start_command}")
+
+
+def layout_of(window):
+    """For the hooks that change a layout: (w, h, layout, tree, @tls-base,
+    panes) of window, with panes as (number, left, top, width, height, start
+    command) in the order of the layout. None if there is no such window, or
+    it is zoomed, or tmux lists its panes in another order than its layout
+    has them: tmux puts panes in the cells of a layout in its own order."""
+    out = tmux("list-panes", "-t", window, "-F", "\t".join(LAYOUT_FIELDS), server=[])
+    rows = [line.split("\t", 10) for line in (out or "").splitlines()]
+    if not rows or any(len(r) != 11 or not all(n.isdigit() for n in r[:2] + r[6:10]) for r in rows):
+        return None
+    tree = parse_layout(rows[0][3])
+    panes = [(int(r[5].lstrip("%")), int(r[6]), int(r[7]), int(r[8]), int(r[9]), start_command(r[10])) for r in rows]
+    if rows[0][2] == "1" or tree is None or layout_panes(tree) != [p[0] for p in panes]:
+        return None
+    return int(rows[0][0]), int(rows[0][1]), rows[0][3], tree, rows[0][4], panes
+
+
+def bar_targets(w, h, panes):
+    """scale_layout's bars in a w x h window with panes (layout_of), for each
+    pane that runs ttop: ("w", columns) for a ttv bar, a ttop without -f
+    along the whole right edge; ("h", lines) for a tth bar, the same along
+    the bottom edge, at their sizes there (bar_sizes); None for any other
+    ttop, which keeps its size, as one with -f fits its pane itself."""
+    bars, sizes = {}, None
+    for num, left, top, pw, ph, cmd in panes:
+        if not is_ttop(cmd):
+            continue
+        right = (left + pw, top, ph) == (w, 0, h) and pw < w
+        bottom = (top + ph, left, pw) == (h, 0, w) and ph < h
+        bars[num] = None
+        if (right or bottom) and not ttop_fits(cmd):
+            sizes = sizes or bar_sizes(w, h, cell_size(server=[]))
+            bars[num] = ("w", sizes[0]) if right else ("h", sizes[1])
+    return bars
+
+
 def relayout(window):
     """window-resized hook: give the panes of window the proportions of the
-    last layout you made there (@tls-base), at the window's new size."""
+    last layout you made there (@tls-base), at the window's new size, and a
+    ttv or tth bar its size there."""
     if conf("resize", "proportional") == "off":
         return
-    out = tmux("list-panes", "-t", window, "-F", "\t".join((
-        "#{window_width}", "#{window_height}", "#{window_zoomed_flag}", "#{window_layout}", "#{@tls-base}",
-        "#{pane_id}", "#{pane_start_command}")), server=[])
-    rows = [line.split("\t", 6) for line in (out or "").splitlines()]
-    if not rows or any(len(r) != 7 for r in rows) or not (rows[0][0].isdigit() and rows[0][1].isdigit()):
+    got = layout_of(window)
+    if got is None:
         return
-    (w, h), zoomed, now, base = map(int, rows[0][:2]), rows[0][2], rows[0][3], rows[0][4]
-    cur, old, size = parse_layout(now), parse_layout(base), "%dx%d" % (w, h)
-    if zoomed == "1" or cur is None or layout_panes(cur) != [int(r[5].lstrip("%")) for r in rows]:
-        return  # tmux puts panes in layout cells in its own order of them: they must agree
+    w, h, now, cur, base, panes = got
+    old, size = parse_layout(base), "%dx%d" % (w, h)
     if old is None or layout_shape(old) != layout_shape(cur):  # the splits changed: start again from these
         tmux("set", "-w", "-t", window, "@tls-base", now, ";", "set", "-w", "-t", window, "@tls-size", size,
              server=[])
         return
-    bars = {int(r[5].lstrip("%")): ttop_fits(start_command(r[6])) for r in rows if is_ttop(start_command(r[6]))}
-    new = scale_layout(old, w, h, bars)
+    new = scale_layout(old, w, h, bar_targets(w, h, panes))
     if new is None:
         return
     # Only at the size it is for: tmux resizes the window to a layout of another size.
     tmux("if-shell", "-F", "-t", window, "#{==:#{window_width}x#{window_height},%s}" % size,
          "select-layout -t %s '%s' ; set -wF -t %s @tls-applied '#{window_layout}' ; set -w -t %s @tls-size %s"
          % (window, dump_layout(new), window, window, size), server=[])
+
+
+def keep_bars(window):
+    """The hook when you switch to a pane, window or session: a ttv or tth bar
+    in window that lost its size, as after a drag, gets it back, and the
+    other panes share the change in proportion. The layout hook then keeps
+    the new layout, as one that you made."""
+    if conf("resize", "keep-bars") == "off":
+        return
+    got = layout_of(window)
+    if got is None:
+        return
+    w, h, _, cur, _, panes = got
+    bars = bar_targets(w, h, panes)
+    if not any(bars.values()):
+        return
+    new = scale_layout(cur, w, h, bars)
+    if new is not None and new != cur:
+        tmux("if-shell", "-F", "-t", window, "#{==:#{window_width}x#{window_height},%dx%d}" % (w, h),
+             "select-layout -t %s '%s'" % (window, dump_layout(new)), server=[])
 
 
 def new_session(preset=False):
@@ -2580,6 +2676,9 @@ def main(argv):
         return 0
     if cmd == "relayout" and len(argv) == 2:  # tmux hook, after a window changed size
         guarded(relayout, argv[1])
+        return 0
+    if cmd == "bars" and len(argv) == 2:  # tmux hook, after you switched to a pane, window or session
+        guarded(keep_bars, argv[1])
         return 0
     if cmd == "setup":
         return setup()
