@@ -25,7 +25,8 @@ what you saw.
    Ctrl+Q away from all programs: Ctrl+W closes a pane with no question. Its copy keys send
    text to `pbcopy`, a macOS command.
 5. **Do not add `tmux_autostart`** unless the user asks for it. With it, each interactive
-   terminal opens in tmux, and a detach closes the shell.
+   terminal opens in tmux, and a detach closes the shell. After a reboot, the first terminal
+   also brings back the old tmux sessions and starts their agents again.
 
 ## 1. Check the machine
 

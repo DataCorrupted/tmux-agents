@@ -24,6 +24,9 @@
                       file with each setting at its default, commented out
   tls resume ID|all   bring back a dead agent's tmux session as it was: windows,
                       splits, and each dead agent's resume command in its pane
+  tls revive          after a reboot, once: bring back each tmux session that
+                      the reboot stopped, as it was, with its agents
+                      (tmux_autostart and the first ttop run it)
   tls forget ID       drop a dead agent from the list
   tls new-name        print a free adjective-noun session name (for `t` and n)
   tls preset [WINDOW] give a window with one pane (default: this one) the
@@ -108,6 +111,15 @@ In ttop inside tmux, bold marks where you are: the name of the session that
 the ttop is in, and the name of the agent whose pane is active there (when
 you go into the ttop, the pane that you came from).
 
+After a reboot, the first tmux_autostart (before it opens its session) or
+the first ttop brings back each tmux session that the reboot stopped, as it
+was: its windows and splits, shells in their directories, ttop in its bar,
+and its dead agents with their resume commands. tls saves each session for
+this, also one with no agent. A session that is there already keeps what it
+has. Agents outside tmux stay in the dead list. This occurs once a boot; R
+brings back dead agents at any time. To stop it: bring-back = off in the
+[reboot] section of the settings file.
+
 Dots: red blocked · yellow waiting on you · green done, not looked at yet ·
 blue busy (hollow: turn over, background task still running) · grey idle ·
 ? agent with no status yet · x dead (pane closed or machine rebooted).
@@ -176,15 +188,27 @@ this file.
 # session in the old cwd and types `claude --resume <id>`. Dead records go after
 # 14 days, or once Claude's transcript is gone.
 #
-# Hooks and ttop also save the structure of each tmux session an agent runs or
-# ran in (windows, layout strings, each pane's directory and agent) to
-# layouts.json, keyed by tmux server, so a reboot can't overwrite it. While a
-# dead agent has lost its pane, its session keeps the structure from before.
+# Hooks and ttop also save the structure of each tmux session (windows, layout
+# strings, each pane's directory and agent) to layouts.json, keyed by tmux
+# server, so a reboot can't overwrite it. While a dead agent has lost its
+# pane, its session keeps the structure from before. A session that is gone
+# stays while an agent record points at it, and one of another server (which
+# a reboot stopped) stays until revive has run in this boot.
 # Bringing an agent back: if its pane sits at a shell prompt, resume types
 # there. Else its session is rebuilt if it's gone (every window and pane; other
 # panes come back as shells in their old directories), or its pane is split
 # back into its window, and the saved layout puts the splits back. With nothing
 # saved, it gets a new window.
+#
+# After a reboot, `tls revive` brings it all back, once: tmux_autostart runs
+# it before it opens its session, and each ttop when it starts. The file boot
+# holds the boot ID of its last run. The first call in a new boot writes it
+# before it starts, so a failure cannot make it run twice (boot.lock lets one
+# tls do it; tmux_autostart waits for that one). Then the dead agents that ran
+# in tmux before this boot come back (restore), and each other session of the
+# old servers that is not there is rebuilt. With no file yet, as after an
+# install, it only writes the file. Each save of layouts.json also writes a
+# missing file, so the first reboot after an install brings it all back too.
 #
 # Del kills a session or an agent's pane once you confirm. The agents' records
 # are marked deleted first, so the dying Claude's last hooks can't list them as
@@ -272,6 +296,9 @@ SETTINGS = (  # (section, key, default, kind, help); kind: words to pick from, i
     ("agents", "commands", "claude codex gemini", "words",
      "A pane that runs one of these commands shows as an agent before the agent reports."),
     ("agents", "keep-dead-days", 14, int, "A dead agent stays in the list this many days, or until its transcript goes."),
+    ("reboot", "bring-back", "on", ("on", "off"),
+     "on: after a reboot, the first tmux_autostart or ttop brings back each tmux session that the reboot stopped, "
+     "as it was, with its agents. off: the dead agents stay in the list of ttop, where R brings them all back."),
 )
 SETTING_ENV = {"TLS_PRESET": ("preset", "layout"), "TLS_CLAUDE": ("agents", "claude"),
                "TLS_AGENT_COMMANDS": ("agents", "commands")}
@@ -533,11 +560,26 @@ else:
 # ── state store ──────────────────────────────────────────────────────────────
 
 class Lock:
+    """The lock of the records, or of another file in the state directory.
+    wait: seconds to wait for it (None: as long as it takes); got is False
+    when that time ran out."""
+    def __init__(self, name=".lock", wait=None):
+        self.name, self.wait = name, wait
+
     def __enter__(self):
         import fcntl
         os.makedirs(STATE_DIR, exist_ok=True)
-        self.f = open(os.path.join(STATE_DIR, ".lock"), "a")
-        fcntl.flock(self.f, fcntl.LOCK_EX)
+        self.f = open(os.path.join(STATE_DIR, self.name), "a")
+        end, self.got = time.time() + (self.wait or 0), True
+        while True:
+            try:
+                fcntl.flock(self.f, fcntl.LOCK_EX | (0 if self.wait is None else fcntl.LOCK_NB))
+                break
+            except BlockingIOError:
+                if time.time() >= end:
+                    self.got = False
+                    break
+                time.sleep(0.1)
         return self
 
     def __exit__(self, *exc):
@@ -1092,6 +1134,11 @@ def layouts_path():
     return os.path.join(STATE_DIR, "layouts.json")
 
 
+def boot_path():
+    """The file with the ID of the boot in which revive ran last."""
+    return os.path.join(STATE_DIR, "boot")
+
+
 def load_layouts():
     """{tmux server: {session: structure}}, as save_layout keeps it."""
     try:
@@ -1102,10 +1149,13 @@ def load_layouts():
 
 
 def save_layout(panes, recs, boot):
-    """Save the structure of the sessions agents run or ran in, so that a dead
-    agent can come back where it was. While an agent that died has lost its
-    pane, its session keeps the structure from before. An entry goes once no
-    agent record points at its session. Caller holds Lock."""
+    """Save the structure of each tmux session of the server of panes, so
+    that a dead agent can come back where it was, and a reboot can bring
+    back each session (revive). While an agent that died has lost its pane,
+    its session keeps the structure from before. A session that is gone
+    stays while an agent record points at it. Else it goes, but one of
+    another tmux server (one that a reboot stopped) stays until revive has
+    run in this boot. Caller holds Lock."""
     if not panes:
         return
     server = panes[0]["server"]
@@ -1115,11 +1165,16 @@ def save_layout(panes, recs, boot):
               for r in sorted(here, key=lambda r: alive(r, boot))}
     dead = {r["session_id"] for r in here if not alive(r, boot)}
     refs = {((r.get("tmux") or {}).get("server"), (r.get("tmux") or {}).get("session")) for r in kept}
+    noted = read(boot_path()).strip()
+    if not noted:  # none yet, as after an install: from now on, the next reboot brings the sessions back
+        note_boot(boot)
+    waiting = (noted or boot) != boot  # revive has not run in this boot yet
     d = load_layouts()
+    live = structure(panes, agents)
     mine, changed = dict(d.get(server) or {}), False
-    for name, st in structure(panes, agents).items():
+    for name, st in live.items():
         old = mine.get(name)
-        if (server, name) not in refs or old == st:
+        if old == st:
             continue
         have = {p["id"] for w in st["windows"] for p in w["panes"]}
         if old and any(p.get("agent") in dead and p["id"] not in have
@@ -1130,7 +1185,7 @@ def save_layout(panes, recs, boot):
         d[server] = mine
     for key in list(d):
         for name in list(d[key]):
-            if (key, name) not in refs:
+            if (key, name) not in refs and (name not in live if key == server else not waiting):
                 del d[key][name]
                 changed = True
         if not d[key]:
@@ -1939,6 +1994,59 @@ def restore_all(snap):
     return done
 
 
+def note_boot(boot):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = "%s.%d.tmp" % (boot_path(), os.getpid())
+    with open(tmp, "w") as f:
+        f.write(boot + "\n")
+    os.replace(tmp, boot_path())
+
+
+def revive(wait=0):
+    """After a reboot, once: bring back each tmux session that the reboot
+    stopped, as it was, with its agents (bring_back). The first call in a
+    boot does it. It notes the boot before it starts, so it runs once, also
+    if it fails. With no boot noted yet, as after an install, it only notes
+    this one. wait: seconds to wait while another tls does it (tmux_autostart
+    waits, because it must open its session after that session is back).
+    Returns the names of the sessions that it brought back."""
+    boot = boot_id()
+    if not wait and read(boot_path()).strip() == boot:
+        return []  # done in this boot: each ttop asks when it starts
+    with Lock("boot.lock", wait) as lock:
+        noted = read(boot_path()).strip() or None
+        if not lock.got or noted == boot:
+            return []
+        on = noted is not None and conf("reboot", "bring-back") == "on"
+        # Before the note: until then, save_layout keeps the sessions that the reboot stopped.
+        snap, layouts = (snapshot(), load_layouts()) if on else (None, None)
+        note_boot(boot)
+        return bring_back(boot, snap, layouts) if on else []
+
+
+def bring_back(boot, snap, layouts):
+    """revive's work: each dead agent that ran in tmux before this boot
+    comes back where it was (restore); then each other session of an older
+    tmux server that is not here comes back: windows, splits, shells in
+    their directories, and ttop in its bar. A session that is here keeps
+    what it has. When old servers have sessions of the same name, the newest
+    server's comes back. An agent outside tmux stays dead: VS Code brings
+    back its own. Returns the names of the sessions brought back."""
+    gone = [r for r in snap["gone"] if r.get("boot_id") != boot and (r.get("tmux") or {}).get("session")]
+    names = restore_all(dict(snap, gone=gone))
+    server = snap["panes"][0]["server"] if snap["panes"] else ""
+    started = lambda key: int(key.rpartition(":")[2]) if key.rpartition(":")[2].isdigit() else 0
+    for key in sorted((k for k in layouts if k != server), key=started, reverse=True):
+        for name, st in sorted(layouts[key].items()):
+            if tmux("has-session", "-t", "=" + name) is None:
+                rebuild(name, st, set(), False)
+                if tmux("has-session", "-t", "=" + name) is not None:
+                    names.append(name)
+    if names:  # now, before a client comes: the panes keep their proportions when it resizes the windows
+        register_tmux_hooks()
+    return names
+
+
 def plural(n, word):
     return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
@@ -2515,6 +2623,10 @@ def ttop(vertical=None, preset=False, fit_pane=False):
     if conf_problems():
         msg, msg_until = "tls.conf: %s · tls config" % conf_problems()[0], time.time() + 10
     try:
+        back = []  # the first ttop after a reboot brings back what the reboot stopped
+        guarded(lambda: back.extend(revive()))
+        if back:
+            msg, msg_until = "after the reboot: brought back " + ", ".join(dict.fromkeys(back)), time.time() + 10
         while True:
             if time.time() >= refresh_at:
                 snap = snapshot()
@@ -2680,6 +2792,12 @@ def main(argv):
     if cmd == "bars" and len(argv) == 2:  # tmux hook, after you switched to a pane, window or session
         guarded(keep_bars, argv[1])
         return 0
+    if cmd == "revive" and len(argv) == 1:  # tmux_autostart, before it opens its session
+        back = []
+        guarded(lambda: back.extend(revive(wait=10)))
+        if back:
+            print("brought back after the reboot: " + ", ".join(dict.fromkeys(back)))
+        return 0
     if cmd == "setup":
         return setup()
     if cmd == "resume" and len(argv) == 2:
@@ -2748,4 +2866,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        rc = main(sys.argv[1:])
+        sys.stdout.flush()
+    except BrokenPipeError:  # the reader stopped early, as head or grep -q do: no traceback
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        rc = 1
+    sys.exit(rc)

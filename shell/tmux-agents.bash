@@ -213,11 +213,14 @@ tmux-cache-clean() {
 # tmux_autostart [NAME]: on an interactive terminal outside tmux, attach to
 # session NAME (default main), creating it if needed, and exit the shell when
 # tmux exits or detaches. Needs a real tty: remote bootstraps (VS Code's runs
-# `bash -ilc` on pipes) have no terminal for tmux to open.
+# `bash -ilc` on pipes) have no terminal for tmux to open. After a reboot, the
+# tmux sessions that the reboot stopped come back first (`tls revive`, once a
+# boot), so that NAME opens as it was.
 tmux_autostart() {
     command -v tmux &>/dev/null && [[ $- == *i* ]] && [ -t 0 ] && [ -t 1 ] \
         && [ "$TERM" != dumb ] && [[ ! "$TERM" =~ screen ]] && [[ ! "$TERM" =~ tmux ]] \
         && [ -z "$TMUX" ] || return 0
+    command -v tls >/dev/null && tls revive >/dev/null 2>&1
     # Deliberately not `exec`: if tmux cannot start for any reason, fall through
     # to a plain shell rather than dropping the login. An `exec` here means one
     # broken tmux locks you out of the machine entirely.

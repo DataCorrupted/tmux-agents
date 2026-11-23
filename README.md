@@ -37,8 +37,10 @@ tmux-agents fixes both problems.
   tmux, ttop switches your terminal to that session. Outside tmux, ttop attaches to it.
   Detach to come back to ttop. Enter on a session takes you to the ttop bar there, with
   that session selected, so ↓ and Enter take you through your sessions one by one.
-- **Restore after a reboot.** ttop lists the agents that died. Press R, and each agent comes
-  back in its old session, window and pane, and continues its conversation.
+- **Restore after a reboot.** The first `tmux_autostart` or ttop after a reboot brings back
+  each tmux session as it was: its windows, splits and directories, its ttop bar, and its
+  agents, which continue their conversations. ttop lists the agents that died at other
+  times. Press R, and each one comes back in its old session, window and pane.
 - **Session control.** `n` opens a new session with a free name. Del deletes a session or an
   agent, after you confirm.
 - **Resize in proportion.** When a window changes size, for example on a different monitor,
@@ -108,7 +110,8 @@ Two options are not in the default install:
 - `./install.sh --tmux-conf` also installs `config/tmux.conf` as `~/.tmux.conf`, with a
   backup. It is the tmux config of the author, and tls does not need it.
 - `tmux_autostart main` in `~/.bashrc`, after the line for `tmux-agents.bash`, starts each
-  interactive terminal in the tmux session `main`.
+  interactive terminal in the tmux session `main`. After a reboot, it first brings back
+  your sessions, so `main` also opens as it was.
 
 ## Use
 
@@ -284,6 +287,23 @@ when the state of an agent changes and its tmux server does not have the hooks o
 `tls setup`. To use the tmux way again, set `proportional = off` in the `[resize]` section
 of the [settings file](#settings).
 
+### After a reboot
+
+A reboot stops tmux and all agents. After the reboot, the first `tmux_autostart` (in a new
+terminal) or the first ttop brings back each tmux session as it was:
+
+- its windows, with their names and splits, and each pane in its old directory;
+- a shell in each pane, and ttop in each ttop bar;
+- each agent, with its resume command (`claude --resume ID`), so it continues its
+  conversation.
+
+`tmux_autostart` does this before it opens its session, so `main` also comes back as it
+was. A session that you make before that keeps what it has. This occurs once a boot.
+Other programs in panes, and a ttop that you started from a shell, come back as shells.
+Agents outside tmux, such as the agent panel of VS Code, stay in the dead list, because
+VS Code brings them back. R in ttop brings back the dead agents at any time. To stop it,
+set `bring-back = off` in the `[reboot]` section of the [settings file](#settings).
+
 ### Shell helpers
 
 | Shell helper | Action |
@@ -294,7 +314,7 @@ of the [settings file](#settings).
 | `tt` | Run `ttop`, with the same options: `tt -v`, `tt -h`, `tt -f`, `tt -p`. |
 | `tmux-doctor` | Show the versions of the tmux client and the tmux server. Use it when tmux fails after an upgrade. |
 | `tmux-cache-clean` | Delete the copies of old tmux clients that no server needs. |
-| `tmux_autostart [NAME]` | On an interactive terminal outside tmux, attach to session NAME (default `main`). Exit the shell when tmux detaches. |
+| `tmux_autostart [NAME]` | On an interactive terminal outside tmux, attach to session NAME (default `main`). Exit the shell when tmux detaches. After a reboot, first bring back the sessions that the reboot stopped (`tls revive`). |
 
 `t` and `tmv` take only session names of ASCII letters, digits, `_` and `-`, with no `-`
 first. A name with `-` first reads as an option: before `t` knew `-p`, `t -p` made a session
@@ -334,8 +354,12 @@ report.
   picks `waiting`, `blocked` or `done`. For your own rules, put a Python file
   `tmux-agent-classify` next to `tls`. Its `classify(text)` must return
   `(verdict, rule, sentence)`.
-- tls saves the layout of each session that has an agent, in `layouts.json`. A dead agent
-  comes back in one of three ways:
+- After a reboot, `tls revive` runs once. `tmux_autostart` runs it before it opens its
+  session, and each ttop runs it when it starts. It brings back the dead agents that ran in
+  tmux, and makes each other session of the old tmux server again. A file `boot` in the
+  state directory holds the boot of its last run.
+- tls saves the layout of each session in `layouts.json`. A dead agent comes back in one of
+  three ways:
   - If its old pane shows a shell prompt, tls types the resume command there.
   - If its session is gone, tls makes the session again: all windows, each pane in its old
     directory, and the saved layout.
@@ -369,6 +393,7 @@ change. `tls config --defaults` prints the file with the defaults.
 | `[preset]` | `layout` (auto, right, bottom), `wide`, `pane-width`, `right-width`, `bottom-min-lines`, `bottom-max-lines` |
 | `[resize]` | `proportional` (on, off), `keep-bars` (on, off) |
 | `[agents]` | `claude`, `commands`, `keep-dead-days` |
+| `[reboot]` | `bring-back` (on, off: the first `tmux_autostart` or ttop after a reboot brings back the sessions) |
 
 Environment variables win over the file:
 
@@ -399,7 +424,7 @@ Environment variables win over the file:
 ## Tests
 
 ```sh
-bin/tls-test     # about 190 checks on throwaway tmux servers
+bin/tls-test     # about 210 checks on throwaway tmux servers
 ```
 
 The test does not touch your tmux server, your settings or your state directory. Each tmux

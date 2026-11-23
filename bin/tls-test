@@ -16,9 +16,11 @@ check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; fails=$((fails
 retry() { for _ in $(seq 25); do "$@" && return 0; sleep 0.2; done; return 1; }
 field() { /usr/bin/python3 -IS -c "import json,sys; r=json.load(open(sys.argv[1])); print(r$1)" "$D/state/$SID.json" 2>/dev/null; }
 cleanup() {
-  $T kill-server 2>/dev/null; $TT kill-server 2>/dev/null
-  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE8:-} ${FAKE9:-} ${FAKE10:-} 2>/dev/null
-  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SRV}_term"
+  $T kill-server 2>/dev/null; $TT kill-server 2>/dev/null; tmux -L "${SRV}_rb" kill-server 2>/dev/null
+  kill "$FAKE" ${FAKE2:-} ${FAKE3:-} ${FAKE5:-} ${FAKE6:-} ${FAKE7:-} ${FAKE8:-} ${FAKE9:-} ${FAKE10:-} \
+    ${FAKE11:-} ${FAKE12:-} 2>/dev/null
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SRV}_term" \
+    "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SRV}_rb"
   rm -rf "$D"
 }
 trap cleanup EXIT
@@ -951,6 +953,117 @@ print("ok" if not bad else "%s: %r" % (bad, (h1, h2, v1, v2)))' "$TLS"
 }
 check "a session with one agent: two rows to select, on one line in the horizontal layout" '[ "$(parts_py)" = ok ]'
 check "no hook errors logged" '[ ! -s "$D/state/errors.log" ]'
+
+# After a reboot, the first tmux_autostart or ttop brings back each tmux
+# session that the reboot stopped, as it was, with its agents; once a boot.
+# Here a reboot is a new tmux server, and the boot ID of before in the records
+# and the boot file. A tmux server and a state dir of their own: panes run sh,
+# and the bar runs a stand-in ttop.
+RS="${SRV}_rb"; R="tmux -L $RS"; RD="$D/rb"
+printf 'set -g default-command sh\n' > "$D/rb.conf"
+mkdir -p "$D/bin" "$D/vsc"; printf '#!/bin/sh\nexec sleep 600\n' > "$D/bin/ttop"; chmod +x "$D/bin/ttop"
+rbtls() { TLS_STATE_DIR="$RD" TLS_TMUX="-L $RS -f $D/rb.conf" TLS_CLAUDE="echo claude" "$TLS" "$@"; }
+rshows() { $R capture-pane -p -t "$1" | grep -q "$2"; }
+rclient_on() { $R list-clients -F '#{client_session}' 2>/dev/null | grep -qx "$1"; }
+rgeom() {  # rgeom SESSION: each pane's place, size and directory, and whether it runs ttop
+  $R list-panes -t "=$1:" -F '#{pane_left},#{pane_top} #{pane_width}x#{pane_height} #{pane_current_path} #{?#{m:*ttop*,#{pane_start_command}},ttop,-}'
+}
+saved_on() {  # saved_on SERVER: the names of the sessions that layouts.json keeps for that tmux server
+  /usr/bin/python3 -IS -c 'import json, sys
+print(" ".join(sorted(json.load(open(sys.argv[1])).get(sys.argv[2], {}))))' "$RD/layouts.json" "$1"
+}
+boot_now() {
+  /usr/bin/python3 -ISB -c 'import importlib.machinery as m, importlib.util as u, sys
+l = m.SourceFileLoader("tls", sys.argv[1]); t = u.module_from_spec(u.spec_from_loader("tls", l)); l.exec_module(t)
+print(t.boot_id())' "$TLS"
+}
+reboot() {  # the tmux server and the agents stop, and the machine boots again
+  kill $FAKE11 $FAKE12 2>/dev/null; $R kill-server 2>/dev/null
+  /usr/bin/python3 -IS -c 'import glob, json, sys
+for f in glob.glob(sys.argv[1] + "/*-*.json"):
+    r = json.load(open(f)); r["boot_id"] = "old-boot"; r.pop("resuming_at", None); json.dump(r, open(f, "w"))' "$RD"
+  echo old-boot > "$RD/boot"
+}
+$R -f "$D/rb.conf" new-session -d -s work -x 160 -y 40 -c "$D"
+W1=$($R display -p -t =work: '#{pane_id}')
+$R split-window -d -h -t "$W1" -c /tmp
+$R split-window -d -f -h -l 25 -t "$W1" -c "$D" "'$D/bin/ttop' -v"
+$R new-session -d -s plain -x 160 -y 40 -c /tmp
+$R split-window -d -v -t =plain: -c "$D"
+$R new-session -d -s main -x 160 -y 40 -c "$D"
+$R split-window -d -h -t =main: -c "$D"
+$R new-session -d -s gone1 -x 160 -y 40
+S1=$($R display -p '#{pid}:#{start_time}')
+RSID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+VSID=bbbbbbbb-cccc-dddd-eeee-ffffffffffff
+sleep 600 & FAKE11=$!
+sleep 600 & FAKE12=$!
+printf '{"session_id":"%s","hook_event_name":"SessionStart","cwd":"%s","transcript_path":"%s","source":"startup"}' \
+  $RSID "$D" "$D/transcript.jsonl" |
+  TLS_STATE_DIR="$RD" TMUX="$($R display -p '#{socket_path}'),1,0" TMUX_PANE="$W1" CLAUDE_PID=$FAKE11 \
+    CLAUDE_CODE_ENTRYPOINT=cli "$TLS" hook
+printf '{"session_id":"%s","hook_event_name":"SessionStart","cwd":"%s","transcript_path":"%s","source":"startup"}' \
+  $VSID "$D/vsc" "$D/transcript.jsonl" |
+  env -u TMUX -u TMUX_PANE TLS_STATE_DIR="$RD" VSCODE_IPC_HOOK_CLI=/tmp/x CLAUDE_PID=$FAKE12 \
+    CLAUDE_CODE_ENTRYPOINT=cli "$TLS" hook
+check "an agent's report notes the boot, so that the next reboot brings the sessions back" \
+  '[ "$(cat "$RD/boot")" = "$(boot_now)" ]'
+rbtls >/dev/null
+check "tls saves each tmux session, also one with no agent" '[ "$(saved_on "$S1")" = "gone1 main plain work" ]'
+$R kill-session -t =gone1; rbtls >/dev/null
+check "a session with no agent that you close goes from the saved ones" '[ "$(saved_on "$S1")" = "main plain work" ]'
+GEOM_W=$(rgeom work); GEOM_P=$(rgeom plain)
+
+reboot
+$R -f "$D/rb.conf" new-session -d -s main -x 160 -y 40   # made after the reboot, before the first ttop
+RT=$($TT new-window -d -P -F '#{pane_id}' -t term: \
+  "env -u TMUX TLS_STATE_DIR='$RD' TLS_TMUX='-L $RS -f $D/rb.conf' TLS_CLAUDE='echo claude' '$HERE/ttop'")
+check "after a reboot, the first ttop brings back the sessions that the reboot stopped" \
+  'retry shows "$RT" "after the reboot: brought back work, plain"'
+check "each one as it was: splits, directories, and ttop in its bar" \
+  '[ "$(rgeom work)" = "$GEOM_W" ] && [ "$(rgeom plain)" = "$GEOM_P" ]'
+check "with its dead agent, which gets its resume command" 'retry rshows =work:0.0 "^claude --resume $RSID"'
+check "a session that is there already keeps what it has, and an agent outside tmux stays dead" \
+  '[ "$($R list-panes -t =main: | wc -l)" = 1 ] && ! $R has-session -t =vsc 2>/dev/null && ! grep -q resuming_at "$RD/$VSID.json"'
+check "the boot file holds this boot now" '[ "$(cat "$RD/boot")" = "$(boot_now)" ]'
+rbtls revive > "$D/again"; rbtls >/dev/null
+check "once a boot: tls revive again brings back nothing" \
+  '[ ! -s "$D/again" ] && [ "$($R list-windows -a | wc -l)" = 3 ] && [ "$(rgeom work)" = "$GEOM_W" ]'
+check "then the old server keeps only the session that a dead agent points at" '[ "$(saved_on "$S1")" = work ]'
+$TT send-keys -t "$RT" q
+
+reboot
+printf '%s\n' "tmux() { command tmux -L $RS \"\$@\"; }" \
+  "tls() { TLS_STATE_DIR='$RD' TLS_TMUX='-L $RS -f $D/rb.conf' TLS_CLAUDE='echo claude' '$TLS' \"\$@\"; }" \
+  ". '$LIB'" "tmux_autostart plain" > "$D/autostart-rb"
+$TT new-window -d -t term: "env -u TMUX TERM=xterm-256color bash --norc --noprofile -i '$D/autostart-rb'"
+check "after a reboot, tmux_autostart brings back the sessions before it opens its own, as it was" \
+  'retry rclient_on plain && [ "$($R list-panes -t =plain: -F "#{pane_current_path}" | tr "\n" " ")" = "/tmp $D " ] &&
+   $R has-session -t =work'
+$R detach-client -s plain
+
+reboot
+rbtls revive > "$D/rv1" & RV1=$!
+rbtls revive > "$D/rv2" & RV2=$!
+wait $RV1 $RV2
+check "two at once: one brings the sessions back, and the other waits for it" \
+  '[ "$(cat "$D/rv1" "$D/rv2" | grep -c "^brought back after the reboot: work")" = 1 ] &&
+   [ "$($R list-windows -t =work: | wc -l)" = 1 ] && [ "$($R list-panes -t =work: | wc -l)" = 3 ]'
+check "and the tmux server has the hooks of tls before a client comes" \
+  '$R show-hooks -gw | grep -q "^window-resized\[42\] .*relayout"'
+
+reboot
+printf '[reboot]\nbring-back = off\n' > "$D/rb-off.conf"
+TLS_CONFIG="$D/rb-off.conf" rbtls revive > "$D/off"
+check "bring-back = off: after a reboot nothing comes back, and the dead agents wait in the list" \
+  '[ ! -s "$D/off" ] && ! $R list-sessions >/dev/null 2>&1 && [ "$(cat "$RD/boot")" = "$(boot_now)" ] &&
+   rbtls | grep -q "work .*was idle"'
+reboot; rm "$RD/boot"
+rbtls revive > "$D/first"
+check "with no boot noted yet, as after an install, revive only notes this boot" \
+  '[ ! -s "$D/first" ] && ! $R list-sessions >/dev/null 2>&1 && [ "$(cat "$RD/boot")" = "$(boot_now)" ]'
+check "no errors logged after the reboots" '[ ! -s "$RD/errors.log" ]'
+$R kill-server 2>/dev/null
 
 # tls setup in a fake $HOME: merges the hooks without disturbing others,
 # comments out the old alias, and a rerun changes nothing.
